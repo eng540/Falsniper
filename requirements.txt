@@ -1,19 +1,18 @@
-# Elite Sniper v2.0 - Production Dependencies
+# Core Automation
+playwright==1.58.0
 
-# Browser automation
-playwright>=1.40.0
+# CAPTCHA & Image Processing
+ddddocr==1.4.11
+opencv-python-headless>=4.8.0
+Pillow>=10.2.0
+numpy<2
 
-# OCR for captcha solving
-ddddocr>=1.4.3
-
-# Environment configuration
+# Time & Environment
+ntplib>=0.4.0
+pytz>=2024.1
+python-dateutil>=2.8.2
 python-dotenv>=1.0.0
 
-# HTTP requests for Telegram
+# Network & Logging
 requests>=2.31.0
-
-# Timezone handling
-pytz>=2023.3
-
-# NTP time synchronization (new in v2.0)
-ntplib>=0.4.0
+loguru>=0.7.2
