@@ -1862,94 +1862,64 @@ class EliteSniperV2:
     
     def _fill_booking_form(self, page: Page, session: SessionState, worker_logger) -> bool:
         """
-        Fill booking form with user data
-        Uses fast injection for speed
+        [PATCHED] Fill booking form using HUMAN TYPING to trigger validation scripts.
+        Avoids JS injection unless absolutely necessary.
         """
         try:
-            worker_logger.info("📝 Filling form...")
+            worker_logger.info("📝 Filling form (Human Mode)...")
             
-            # Standard fields
-            field_mapping = [
+            # تعريف الحقول والقيم
+            fields = [
                 ("input[name='lastname']", Config.LAST_NAME),
                 ("input[name='firstname']", Config.FIRST_NAME),
                 ("input[name='email']", Config.EMAIL),
                 ("input[name='emailrepeat']", Config.EMAIL),
-                ("input[name='emailRepeat']", Config.EMAIL),
+                ("input[name='emailRepeat']", Config.EMAIL), # Case sensitive check
+                # الحقول الديناميكية (جواز السفر والهاتف)
+                ("input[name='fields[0].content']", Config.PASSPORT),
+                ("input[name='fields[1].content']", Config.PHONE.replace("+", "00").strip())
             ]
             
-            for selector, value in field_mapping:
+            for selector, value in fields:
                 try:
+                    # التحقق من وجود الحقل
                     if page.locator(selector).count() > 0:
-                        self._fast_inject(page, selector, value)
-                except:
+                        # 1. التركيز (Focus) - مهم جداً لتفعيل السكربتات
+                        page.focus(selector)
+                        # 2. مسح المحتوى القديم (إن وجد)
+                        page.fill(selector, "")
+                        # 3. الكتابة البشرية (Typing)
+                        page.type(selector, value, delay=10) # تأخير بسيط جداً (10ms) للمحاكاة
+                        # 4. الخروج من الحقل (Blur) لتثبيت القيمة
+                        page.evaluate(f"document.querySelector(\"{selector}\").blur()")
+                except Exception as e:
+                    worker_logger.debug(f"Field fill error ({selector}): {e}")
                     continue
-            
-            # Dynamic passport field
-            passport = Config.PASSPORT
-            passport_selectors = [
-                "input[name='fields[0].content']",
-                "input[id*='passport']",
-                "input[name*='passport']"
-            ]
-            for selector in passport_selectors:
-                try:
-                    if page.locator(selector).count() > 0:
-                        self._fast_inject(page, selector, passport)
-                        break
-                except:
-                    continue
-            
-            # Dynamic phone field
-            phone = Config.PHONE.replace("+", "00").strip()
-            phone_selectors = [
-                "input[name='fields[1].content']",
-                "input[id*='phone']",
-                "input[name*='phone']",
-                "input[name*='mobile']"
-            ]
-            for selector in phone_selectors:
-                try:
-                    if page.locator(selector).count() > 0:
-                        self._fast_inject(page, selector, phone)
-                        break
-                except:
-                    continue
-            
-            # Purpose/Category selection - uses FULL TEXT values from website!
+
+            # اختيار الفئة (Category)
             try:
+                # نستخدم Select Option الأصلي لأنه الأضمن
                 purpose = Config.PURPOSE.lower() if Config.PURPOSE else "aupair"
                 purpose_value = Config.PURPOSE_VALUES.get(purpose, Config.DEFAULT_PURPOSE)
                 
-                # Use page.select_option for reliable select handling
-                # The select element name is 'fields[2].content'
-                try:
-                    page.select_option("select[name='fields[2].content']", value=purpose_value, timeout=3000)
-                    worker_logger.info(f"[FORM] Purpose set to: {purpose} → '{purpose_value}'")
-                except:
-                    # Fallback: JavaScript selection
+                select_elem = page.locator("select[name='fields[2].content']").first
+                if not select_elem.is_visible():
+                    select_elem = page.locator("select").first
+                
+                if select_elem.is_visible():
+                    # محاولة الاختيار بالقيمة
+                    select_elem.select_option(value=purpose_value)
+                else:
+                    # Fallback: JS Injection for Select only (Selects are tricky)
                     page.evaluate(f"""
-                        const select = document.querySelector("select[name='fields[2].content']") || document.querySelector('select');
-                        if(select) {{
-                            for(let i = 0; i < select.options.length; i++) {{
-                                if(select.options[i].value === '{purpose_value}') {{
-                                    select.selectedIndex = i;
-                                    select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                    break;
-                                }}
-                            }}
-                            // Fallback to first non-empty option
-                            if(select.selectedIndex === 0 && select.options.length > 1) {{
-                                select.selectedIndex = 1;
-                                select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                            }}
-                        }}
+                        const s = document.querySelector('select');
+                        if(s) {{ s.selectedIndex = 1; s.dispatchEvent(new Event('change')); }}
                     """)
-                    worker_logger.info(f"[FORM] Purpose set via JS fallback: {purpose}")
             except Exception as e:
-                worker_logger.warning(f"[FORM] Purpose selection error: {e}")
-            
+                worker_logger.warning(f"Category selection warning: {e}")
+
             self.global_stats.forms_filled += 1
-            worker_logger.info("✅ Form filled")
+            worker_logger.info("✅ Form filled (Humanized)")
             return True
             
         except Exception as e:
@@ -1973,163 +1943,85 @@ class EliteSniperV2:
     
     def _submit_form(self, page: Page, session: SessionState, worker_logger) -> bool:
         """
-        Submit form with deathmatch retry logic
-        Attempts infinite submissions for manual mode, 15 for auto
+        [PATCHED] Submit form using ENTER KEY on Captcha field.
+        This is the most reliable method as it triggers the form's native submit handler.
         """
-        # Infinite Deathmatch Loop (until success or page loss)
-        submission_attempt = 0
-        max_attempts = 1000 if getattr(self.solver, 'manual_only', False) else 15
+        worker_id = session.worker_id
+        max_attempts = 10
         
-        worker_logger.info(f"💀 DEATHMATCH SUBMISSION STARTED (Max {max_attempts} attempts)...")
-        
-        while submission_attempt < max_attempts:
-            submission_attempt += 1
-            
+        worker_logger.info(f"🚀 STARTING SUBMISSION SEQUENCE...")
+
+        for attempt in range(1, max_attempts + 1):
             try:
-                # Solve captcha if present (using our robust retry solver)
-                # Use solve_form_captcha_with_retry instead of basic solve_from_page
-                if page.locator("input[name='captchaText']").count() > 0:
-                     # Only enable infinite retry INSIDE solver if manually configured, 
-                     # but here we prefer the outer loop to control flow.
-                     # We use basic solve here because we want to submit and check result in THIS loop.
-                     success, code, captcha_status = self.solver.solve_form_captcha_with_retry(
-                        page, 
-                        f"SUBMIT_{submission_attempt}",
-                        max_attempts=5, # Short internal retry, rely on outer loop
-                        session_age=int(time.time() - session.created_at)
-                     )
-                     
-                     if success and code:
-                        self.solver.submit_captcha(page)
-                        time.sleep(0.5)
-                        
-                        # -------------------------------------------------------------
-                        # FORCE ENTER KEY (User Request: "Magic Enter")
-                        # -------------------------------------------------------------
-                        # Often the simplest way is just hitting Enter on the page
-                        worker_logger.info("⌨️ PRESSING ENTER (Magic Key)...")
-                        try:
-                            # Focus explicitly before pressing Enter
-                            if page.locator("input[name='captchaText']").count() > 0:
-                                page.locator("input[name='captchaText']").first.focus()
-                            page.keyboard.press("Enter")
-                        except:
-                            pass
-                        time.sleep(1)
-                
-                # FACT-BASED SUBMIT SELECTORS (booking form vs category form)
-                submit_selectors = [
-                    # 1. Main Booking Form Submit (Verified from RK-Termin form.html)
-                    "#appointment_newAppointmentForm_appointment_addAppointment",
-                    "input[name='action:appointment_addAppointment']",
-                    
-                    # 2. Category Selection Submit (Verified from RK-Termin - Kategorie.html)
-                    "#appointment_captcha_month_appointment_showMonth",
-                    "input[name='action:appointment_showMonth']",
-                    
-                    # 3. Fallbacks
-                    "input[type='submit'][value='Submit']",
-                    "input[type='submit'][value='Weiter']"
-                ]
-                
-                clicked = False
-                for selector in submit_selectors:
-                    try:
-                        if page.locator(selector).count() > 0:
-                            page.locator(selector).first.click()
-                            clicked = True
-                            worker_logger.info(f"🖱️ Clicked specific submit button: {selector}")
-                            break
-                    except:
-                        continue
-                
-                if not clicked:
-                     # Fallback to JS submission with authentic action setting
-                     try:
-                        worker_logger.info("⚠️ Click failed - Attempting JS submission with authentic ACTION...")
-                        page.evaluate("""
-                            const form = document.getElementById('appointment_newAppointmentForm');
-                            if(form) {
-                                form.action = "extern/appointment_addAppointment.do"; 
-                                form.submit();
-                            } else {
-                                document.getElementsByName('appointment_newAppointmentForm')[0]?.submit();
-                            }
-                        """)
-                     except Exception as e:
-                        worker_logger.warning(f"JS Submit fallback error: {e}")
+                # 1. التحقق من وجود حقل الكابتشا
+                captcha_input = page.locator("input[name='captchaText']").first
+                if not captcha_input.is_visible():
+                    worker_logger.warning("⚠️ Captcha input not found!")
+                    return False
 
-                if not clicked and not (page.locator("input[name='captchaText']").count() > 0):
-                     # If no button and no captcha, maybe we are stuck?
-                     pass
-
-                # Wait for result
-                time.sleep(2)
+                # 2. حل الكابتشا
+                # نستخدم الحل البسيط هنا لأننا داخل حلقة الموت
+                success, code, _ = self.solver.solve_from_page(page, f"SUBMIT_{attempt}")
                 
-                # Check result
+                if not success or not code:
+                    # إذا فشل الحل، نضغط زر تحديث الصورة ونحاول مرة أخرى
+                    worker_logger.warning("🔄 Captcha solve failed, refreshing image...")
+                    self.solver.reload_captcha(page)
+                    time.sleep(1)
+                    continue
+
+                # 3. كتابة الكود والضغط على ENTER (الحركة السحرية)
+                worker_logger.info(f"⌨️ Typing captcha '{code}' and pressing ENTER...")
+                
+                captcha_input.click()
+                captcha_input.fill(code)
+                time.sleep(0.2)
+                page.keyboard.press("Enter") # 🔥 الضربة القاضية
+                
+                # 4. انتظار النتيجة (حاسم جداً)
+                # ننتظر إما ظهور رقم الموعد أو عودة النموذج (فشل)
+                try:
+                    # ننتظر أي تغيير في الصفحة
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except: pass
+
                 content = page.content().lower()
-                
-                # SUCCESS indicators
+
+                # 5. تحليل النتيجة
                 if "appointment number" in content or "termin nummer" in content:
                     worker_logger.critical("🏆 VICTORY! APPOINTMENT SECURED!")
+                    self.global_stats.success = True
                     
-                    # Save evidence
-                    self.debug_manager.save_debug_html(page, "SUCCESS", session.worker_id)
-                    screenshot_path = self.debug_manager.save_screenshot(page, "VICTORY", session.worker_id)
+                    # حفظ التوثيق
+                    self.debug_manager.save_critical_screenshot(page, "VICTORY", worker_id)
+                    try:
+                        # استدعاء دالة الإشعار الموجودة في الملف الأصلي
+                        from .notifier import send_success_notification
+                        send_success_notification(self.session_id, worker_id)
+                    except: pass
                     
-                    # Send notification with screenshot
-                    if screenshot_path:
-                        send_photo(screenshot_path, "🏆 APPOINTMENT BOOKED!")
-                    
-                    send_alert(
-                        f"🎉🎉🎉 SUCCESS! 🎉🎉🎉\n"
-                        f"✅ Appointment confirmed!\n"
-                        f"👤 {Config.FIRST_NAME} {Config.LAST_NAME}\n"
-                        f"📧 {Config.EMAIL}\n"
-                        f"🆔 Session: {session.session_id}"
-                    )
-                    
-                    self.global_stats.forms_submitted += 1
+                    self.stop_event.set()
                     return True
                 
-                # Check if form still visible (silent rejection or wrong captcha)
-                if page.locator("input[name='lastname']").count() > 0:
-                    worker_logger.warning(f"⚔️ Silent reject/Reload (Attempt {submission_attempt}) - STAYING ON TARGET")
-                    
-                    # -----------------------------------------------------------------
-                    # SMART PERSISTENCE: Ensure we don't just loop on the same bad state
-                    # -----------------------------------------------------------------
-                    
-                    # 1. Refill any cleared fields just in case
+                # هل عدنا لنفس الصفحة؟ (كابتشا خطأ أو رفض صامت)
+                if page.locator("input[name='lastname']").is_visible():
+                    worker_logger.warning(f"↩️ Bounced back to form (Attempt {attempt}). Retrying...")
+                    # مهم: نعيد تعبئة الحقول لأن بعض المواقع تمسحها عند الخطأ
                     self._fill_booking_form(page, session, worker_logger)
-                    
-                    # 2. FORCE CAPTCHA REFRESH if we are looping
-                    # This ensures "Same input = Same result" loop is broken. 
-                    # We force a NEW variable into the equation.
-                    if submission_attempt > 1:
-                         worker_logger.info("🔄 Refreshing Captcha to avoid stale loop...")
-                         self.solver.reload_captcha(page, f"RELOAD_{submission_attempt}")
-                         time.sleep(1)
+                    # نحدث الكابتشا لضمان صورة جديدة
+                    self.solver.reload_captcha(page)
+                    time.sleep(1)
+                    continue
+                
+                # صفحة خطأ صريحة
+                if "error" in content:
+                    worker_logger.error("❌ Server Error Page.")
+                    return False
 
-                    # 3. If manual mode, notify user we are retrying
-                    if getattr(self.solver, 'manual_only', False):
-                        if submission_attempt % 3 == 0: 
-                            send_alert("⚠️ Retrying with FRESH captcha... Keep going!")
-                        
-                    continue # LOOP BACK TO START OF WHILE
-                
-                # Error page
-                if "error" in content or "fehler" in content:
-                    worker_logger.error(f"❌ Error page detected")
-                    self.debug_manager.save_debug_html(page, f"error_submit", session.worker_id)
-                    return False # Lost the form, must return
-                
             except Exception as e:
-                worker_logger.error(f"❌ Submit error: {e}")
+                worker_logger.error(f"⚠️ Submit loop error: {e}")
                 time.sleep(1)
-                continue
         
-        worker_logger.error(f"💀 All {max_attempts} attempts exhausted")
         return False
     
     def _handle_success(self):
@@ -2157,6 +2049,7 @@ class EliteSniperV2:
         runtime = (datetime.datetime.now() - self.start_time).total_seconds()
         logger.info(f"[TIME] Runtime: {runtime:.0f}s")
         logger.info(f"[STATS] Final stats: {self.global_stats.get_summary()}")
+
 
 # Entry point
 if __name__ == "__main__":
