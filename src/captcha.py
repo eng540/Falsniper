@@ -449,6 +449,7 @@ class EnhancedCaptchaSolver:
         if code_len in [4, 5]:
             logger.warning(f"[{location}] OCR incomplete: '{code}' ({code_len} chars) -需要6个字符!")
             return False, "TOO_SHORT"
+    
     def solve(self, image_bytes: bytes, location: str = "SOLVE") -> Tuple[str, str]:
         """
         Solve captcha from image bytes with validation
@@ -479,37 +480,41 @@ class EnhancedCaptchaSolver:
             best_len = 0
             
             for attempt in range(max_attempts):
-                # Solve using OCR
-                result = self.ocr.predict(image_bytes)
+                # ═══════════════════════════════════════════════════════════════
+                # ✅ التصحيح الجراحي: استبدال predict بـ classification
+                # ═══════════════════════════════════════════════════════════════
+                result = self.ocr.classification(image_bytes)
+                
+                # التنظيف والتنسيق
                 result = result.replace(" ", "").strip().lower()
                 
-                # Clean common OCR mistakes
+                # تنظيف أخطاء OCR الشائعة
                 result = self._clean_ocr_result(result)
                 
                 current_len = len(result)
                 
-                # Keep the longest result
+                # الحفاظ على أطول نتيجة
                 if current_len > best_len:
                     best_result = result
                     best_len = current_len
                 
-                # If we got 6 chars, that's perfect - stop trying
+                # إذا حصلنا على 6 أحرف، فهذا مثالي - توقف عن المحاولة
                 if current_len == 6:
                     break
                 
-                # If we got 7-8 chars (aging), that's acceptable
+                # إذا حصلنا على 7-8 أحرف (شيخوخة الجلسة)، فهذا مقبول
                 if current_len >= 7:
                     break
                 
-                # Otherwise, try again
+                # خلاف ذلك، حاول مرة أخرى
                 if attempt < max_attempts - 1:
                     logger.debug(f"[{location}] OCR returned {current_len} chars, retrying... ({attempt+1}/{max_attempts})")
-                    time.sleep(0.1)  # Small delay before retry
+                    time.sleep(0.1)  # تأخير بسيط قبل إعادة المحاولة
             
-            # Use the best result we got
+            # استخدام أفضل نتيجة حصلنا عليها
             result = best_result
             
-            # Validate the result
+            # التحقق من صحة النتيجة
             is_valid, status = self.validate_captcha_result(result, location)
             
             if not is_valid:
@@ -632,7 +637,7 @@ class EnhancedCaptchaSolver:
         session_age: int = 0,
         attempt: int = 1,
         max_attempts: int = 5
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str], str]:
         """
         Complete captcha solving workflow
         Uses pre-solved code if available, then OCR, then manual Telegram fallback
@@ -963,7 +968,10 @@ class CaptchaSolver:
         if not self.ocr:
             return ""
         try:
-            res = self.ocr.predict(image_bytes)
+            # ═══════════════════════════════════════════════════════════════
+            # ✅ التصحيح الجراحي: استبدال predict بـ classification
+            # ═══════════════════════════════════════════════════════════════
+            res = self.ocr.classification(image_bytes)
             res = res.replace(" ", "").strip()
             print(f"[AI] Captcha Solved: {res}")
             return res
