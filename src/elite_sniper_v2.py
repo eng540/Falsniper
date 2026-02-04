@@ -1,6 +1,6 @@
 """
-Elite Sniper v2.0 - Production-Grade Multi-Session Appointment Booking System
-[FIXED - Connection Handling + State Machine Fix]
+Elite Sniper v2.1 - Fixed Unified Version
+Combines working parts from both versions with critical fixes
 """
 
 import time
@@ -9,137 +9,162 @@ import datetime
 import logging
 import os
 import sys
-from enum import Enum, auto
-from typing import List, Tuple, Optional
-from threading import Event, Lock
+import re
+from typing import List, Tuple, Optional, Dict, Any
+from threading import Thread, Event, Lock
+from dataclasses import asdict
 
 import pytz
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser, TimeoutError
+from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser, expect
 
 # Internal imports
 from .config import Config
 from .ntp_sync import NTPTimeSync
-from .session_state import SessionState, SessionStats, SessionRole, SessionHealth
+from .session_state import (
+    SessionState, SessionStats, SystemState, SessionHealth, 
+    SessionRole, Incident, IncidentManager, IncidentType, IncidentSeverity
+)
 from .captcha import EnhancedCaptchaSolver
-from .notifier import send_alert, send_success_notification
+from .notifier import send_alert, send_photo, send_success_notification, send_status_update
 from .debug_utils import DebugManager
+from .page_flow import PageFlowDetector
 
-# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s.%(msecs)03d [%(levelname)s] [%(name)s] %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('elite_sniper_v2.log')
+        logging.FileHandler('elite_sniper_v2_fixed.log')
     ]
 )
-logger = logging.getLogger("EliteSniperV2")
-
-
-class BookingState(Enum):
-    """State Machine States"""
-    INIT = auto()
-    MONTH_SELECTION = auto()
-    DAY_SELECTION = auto()
-    TIME_SELECTION = auto()
-    FORM_READY = auto()         # نقطة اللاعودة
-    FORM_FILLING = auto()
-    FORM_SUBMITTING = auto()
-    SUCCESS = auto()
-    FAILED = auto()
-    CONNECTION_ERROR = auto()   # حالة جديدة: خطأ اتصال
+logger = logging.getLogger("EliteSniperV2_Fixed")
 
 
 class EliteSniperV2:
-    VERSION = "2.0.0"
+    VERSION = "2.1.0-FIXED"
     
     def __init__(self, run_mode: str = "AUTO"):
         self.run_mode = run_mode
-        logger.info(f"[INIT] ELITE SNIPER V{self.VERSION}")
+        
+        logger.info("=" * 70)
+        logger.info(f"[INIT] ELITE SNIPER V{self.VERSION} - INITIALIZING")
+        logger.info(f"[MODE] Running Mode: {self.run_mode}")
+        logger.info("=" * 70)
         
         self._validate_config()
+        
         self.session_id = f"elite_v2_{int(time.time())}_{random.randint(1000, 9999)}"
         self.start_time = datetime.datetime.now()
         
+        self.system_state = SystemState.STANDBY
         self.stop_event = Event()
+        self.slot_event = Event()
+        self.target_url: Optional[str] = None
         self.lock = Lock()
         
         is_manual = (self.run_mode == "MANUAL")
         is_auto_full = (self.run_mode == "AUTO_FULL")
         self.solver = EnhancedCaptchaSolver(manual_only=is_manual)
         if is_auto_full:
+            logger.info("[MODE] AUTO FULL ENABLED")
             self.solver.auto_full = True
-        
+            
         self.debug_manager = DebugManager(self.session_id, Config.EVIDENCE_DIR)
+        self.incident_manager = IncidentManager()
         self.ntp_sync = NTPTimeSync(Config.NTP_SERVERS, Config.NTP_SYNC_INTERVAL)
+        self.page_flow = PageFlowDetector()
         
         self.base_url = self._prepare_base_url(Config.TARGET_URL)
         self.timezone = pytz.timezone(Config.TIMEZONE)
         
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         ]
         
         self.proxies = self._load_proxies()
         self.global_stats = SessionStats()
         self.ntp_sync.start_background_sync()
         
-        # State Machine
-        self.current_state = BookingState.INIT
-        self.form_submit_attempts = 0
-        self.max_submit_attempts = 10
-        self.connection_retries = 0
-        self.max_connection_retries = 3
-    
-    # ==================== Configuration ====================
-    
+        logger.info(f"[ID] Session ID: {self.session_id}")
+        logger.info(f"[OK] Initialization complete")
+
     def _validate_config(self):
         required = ['TARGET_URL', 'LAST_NAME', 'FIRST_NAME', 'EMAIL', 'PASSPORT', 'PHONE']
         missing = [field for field in required if not getattr(Config, field, None)]
         if missing:
             raise ValueError(f"[ERR] Missing configuration: {', '.join(missing)}")
         logger.info("[OK] Configuration validated")
-    
+
     def _prepare_base_url(self, url: str) -> str:
         if "request_locale" not in url:
             separator = "&" if "?" in url else "?"
             return f"{url}{separator}request_locale=en"
         return url
-    
+
     def _load_proxies(self) -> List[Optional[str]]:
         proxies = []
         if hasattr(Config, 'PROXIES') and Config.PROXIES:
             proxies.extend([p for p in Config.PROXIES if p])
+        try:
+            if os.path.exists("proxies.txt"):
+                with open("proxies.txt") as f:
+                    file_proxies = [line.strip() for line in f if line.strip()]
+                    proxies.extend(file_proxies)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load proxies.txt: {e}")
         while len(proxies) < 3:
             proxies.append(None)
         return proxies[:3]
-    
-    # ==================== Time Management ====================
-    
+
     def get_current_time_aden(self) -> datetime.datetime:
         corrected_utc = self.ntp_sync.get_corrected_time()
-        return corrected_utc.replace(tzinfo=pytz.UTC).astimezone(self.timezone)
-    
+        aden_time = corrected_utc.replace(tzinfo=pytz.UTC).astimezone(self.timezone)
+        return aden_time
+
+    def is_pre_attack(self) -> bool:
+        now = self.get_current_time_aden()
+        return (now.hour == 1 and now.minute == Config.PRE_ATTACK_MINUTE and 
+                now.second >= Config.PRE_ATTACK_SECOND)
+
     def is_attack_time(self) -> bool:
         now = self.get_current_time_aden()
         return now.hour == Config.ATTACK_HOUR and now.minute < Config.ATTACK_WINDOW_MINUTES
-    
+
     def get_sleep_interval(self) -> float:
         if self.is_attack_time():
             return random.uniform(Config.ATTACK_SLEEP_MIN, Config.ATTACK_SLEEP_MAX)
-        return random.uniform(Config.PATROL_SLEEP_MIN, Config.PATROL_SLEEP_MAX)
-    
-    # ==================== Session Management ====================
-    
+        elif self.is_pre_attack():
+            return Config.PRE_ATTACK_SLEEP
+        else:
+            now = self.get_current_time_aden()
+            if now.hour == 1 and now.minute >= 45:
+                return Config.WARMUP_SLEEP
+            return random.uniform(Config.PATROL_SLEEP_MIN, Config.PATROL_SLEEP_MAX)
+
+    def get_mode(self) -> str:
+        if self.is_attack_time():
+            return "ATTACK"
+        elif self.is_pre_attack():
+            return "PRE_ATTACK"
+        else:
+            now = self.get_current_time_aden()
+            if now.hour == 1 and now.minute >= 45:
+                return "WARMUP"
+            return "PATROL"
+
     def create_context(self, browser: Browser, worker_id: int, proxy: Optional[str] = None):
         try:
             role = SessionRole.SCOUT if worker_id == 1 else SessionRole.ATTACKER
             user_agent = random.choice(self.user_agents)
+            viewport_width = 1366 + random.randint(0, 50)
+            viewport_height = 768 + random.randint(0, 30)
             
             context_args = {
                 "user_agent": user_agent,
-                "viewport": {"width": 1366, "height": 768},
+                "viewport": {"width": viewport_width, "height": viewport_height},
                 "locale": "en-US",
                 "timezone_id": "Asia/Aden",
                 "ignore_https_errors": True
@@ -152,23 +177,24 @@ class EliteSniperV2:
             context = browser.new_context(**context_args)
             page = context.new_page()
             
-            # Anti-detection
-            page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            page.add_init_script(f"""
+                Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+                Object.defineProperty(navigator, 'plugins', {{ get: () => [1, 2, 3, 4, 5] }});
+                Object.defineProperty(navigator, 'languages', {{ get: () => ['en-US', 'en'] }});
+                setInterval(() => {{
+                    fetch(location.href, {{ method: 'HEAD' }}).catch(()=>{{}});
+                }}, {Config.HEARTBEAT_INTERVAL * 1000});
             """)
             
-            # Timeouts
-            context.set_default_timeout(45000)  # زادنا المهلة
-            context.set_default_navigation_timeout(50000)
+            context.set_default_timeout(25000)
+            context.set_default_navigation_timeout(30000)
             
-            # Block unnecessary resources
             def route_handler(route):
                 resource_type = route.request.resource_type
                 if resource_type in ["image", "media", "font", "stylesheet"]:
                     route.abort()
                 else:
                     route.continue_()
-            
             page.route("**/*", route_handler)
             
             session_state = SessionState(
@@ -181,7 +207,8 @@ class EliteSniperV2:
                 max_captcha_attempts=Config.MAX_CAPTCHA_ATTEMPTS
             )
             
-            logger.info(f"[CTX] [W{worker_id}] Context created")
+            logger.info(f"[CTX] [W{worker_id}] Context created - Role: {role.value}")
+            
             with self.lock:
                 self.global_stats.rebirths += 1
             
@@ -190,9 +217,43 @@ class EliteSniperV2:
         except Exception as e:
             logger.error(f"[ERR] [W{worker_id}] Context creation failed: {e}")
             raise
-    
-    # ==================== Navigation & Form Filling ====================
-    
+
+    def validate_session_health(self, page: Page, session: SessionState, location: str = "UNKNOWN") -> bool:
+        worker_id = session.worker_id
+        
+        if session.is_expired():
+            age = session.age()
+            idle = session.idle_time()
+            logger.critical(f"[EXP] [W{worker_id}][{location}] Session EXPIRED")
+            return False
+        
+        if session.should_terminate():
+            logger.critical(f"💀 [W{worker_id}][{location}] Session POISONED")
+            return False
+        
+        if session.captcha_solved:
+            has_captcha, _ = self.solver.safe_captcha_check(page, location)
+            if has_captcha:
+                logger.critical(f"💀 [W{worker_id}][{location}] DOUBLE CAPTCHA")
+                session.health = SessionHealth.POISONED
+                return False
+        
+        session.touch()
+        return True
+
+    def soft_recovery(self, session: SessionState, reason: str):
+        logger.info(f"🔄 [W{session.worker_id}] Soft recovery: {reason}")
+        session.consecutive_errors = 0
+        session.failures = max(0, session.failures - 1)
+        
+        if session.health == SessionHealth.DEGRADED:
+            session.health = SessionHealth.WARNING
+        elif session.health == SessionHealth.WARNING:
+            session.health = SessionHealth.CLEAN
+        
+        session.touch()
+        logger.info(f"✅ [W{session.worker_id}] Soft recovery completed")
+
     def generate_month_urls(self) -> List[str]:
         try:
             today = datetime.datetime.now().date()
@@ -208,459 +269,458 @@ class EliteSniperV2:
                 urls.append(url)
             
             return urls
-            
         except Exception as e:
             logger.error(f"❌ Month URL generation failed: {e}")
             return []
-    
-    def safe_navigate(self, page: Page, url: str, timeout: int = 40000) -> bool:
-        """تنقل آمن مع معالجة الأخطاء"""
+
+    def _human_type(self, page: Page, selector: str, value: str, worker_logger) -> bool:
+        """
+        [FIX] Human-like typing with proper event triggering
+        """
         try:
-            logger.info(f"[NAV] Navigating to: {url[:80]}...")
-            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-            time.sleep(2)  # استقرار الصفحة
-            return True
-        except TimeoutError:
-            logger.warning(f"[NAV] Timeout for: {url[:60]}...")
-            return False
-        except Exception as e:
-            logger.error(f"[NAV] Error navigating: {e}")
-            return False
-    
-    def handle_captcha_safe(self, page: Page, location: str, session: SessionState) -> bool:
-        """معالجة كابتشا آمنة"""
-        worker_id = session.worker_id
-        
-        try:
-            # فحص الكابتشا
-            has_captcha, _ = self.solver.safe_captcha_check(page, location)
-            if not has_captcha:
-                return True
-            
-            logger.info(f"[CAPTCHA] Solving {location} captcha...")
-            
-            # حل الكابتشا
-            success, code, captcha_status = self.solver.solve_from_page(page, location)
-            
-            # كابتشا سوداء = فشل
-            if captcha_status in ["BLACK_IMAGE", "BLACK_DETECTED"]:
-                logger.error(f"[W{worker_id}] Black captcha detected")
+            locator = page.locator(selector).first
+            if not locator.is_visible():
                 return False
             
-            if success and code:
-                # إدخال الكابتشا
-                captcha_input = page.locator("input[name='captchaText']").first
-                if captcha_input.is_visible():
-                    captcha_input.fill(code)
-                    time.sleep(0.5)
-                    
-                    # الضغط على Enter
-                    captcha_input.press("Enter")
-                    time.sleep(2)
-                    
-                    with self.lock:
-                        self.global_stats.captchas_solved += 1
-                    
-                    logger.info(f"[W{worker_id}] Captcha solved: '{code}'")
-                    return True
+            # Clear field
+            locator.click()
+            locator.fill("")
+            time.sleep(0.1)
             
-            logger.warning(f"[W{worker_id}] Captcha solve failed")
-            with self.lock:
-                self.global_stats.captchas_failed += 1
-            return False
+            # Type with small random delays
+            for char in value:
+                locator.type(char, delay=random.randint(5, 15))
             
+            # Trigger blur to activate validation
+            page.evaluate(f"""
+                const el = document.querySelector("{selector}");
+                if(el) {{
+                    el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+            """)
+            
+            return True
         except Exception as e:
-            logger.warning(f"[W{worker_id}] Captcha handling error: {e}")
+            worker_logger.debug(f"Human type error ({selector}): {e}")
             return False
-    
-    def fill_booking_form_humanized(self, page: Page, session: SessionState) -> bool:
-        """ملء النموذج بطريقة إنسانية"""
-        worker_id = session.worker_id
-        logger.info(f"[FORM] [W{worker_id}] Filling form...")
-        
+
+    def _fill_booking_form(self, page: Page, session: SessionState, worker_logger) -> bool:
+        """
+        [FIXED] Unified form filling with human typing + JS fallback
+        """
         try:
-            # الحقول الأساسية
+            worker_logger.info("📝 Filling form (Hybrid Mode)...")
+            
+            # Standard fields with human typing
             fields = [
                 ("input[name='lastname']", Config.LAST_NAME),
                 ("input[name='firstname']", Config.FIRST_NAME),
                 ("input[name='email']", Config.EMAIL),
-                ("input[name='emailrepeat']", Config.EMAIL),
             ]
             
             for selector, value in fields:
-                try:
-                    if page.locator(selector).count() > 0:
-                        # تركيز وملء
-                        page.locator(selector).first.focus()
-                        time.sleep(0.1)
-                        page.locator(selector).first.fill(value)
-                        time.sleep(0.1)
-                        # حدث blur
-                        page.evaluate(f"document.querySelector('{selector}')?.blur()")
-                except:
-                    continue
+                if not self._human_type(page, selector, value, worker_logger):
+                    # Fallback to fast inject
+                    self._fast_inject(page, selector, value)
             
-            # جواز السفر
-            try:
-                passport_field = page.locator("input[name='fields[0].content']").first
-                if passport_field.is_visible():
-                    passport_field.fill(Config.PASSPORT)
-            except:
-                pass
+            # Email repeat (try both cases)
+            if not self._human_type(page, "input[name='emailrepeat']", Config.EMAIL, worker_logger):
+                self._human_type(page, "input[name='emailRepeat']", Config.EMAIL, worker_logger)
             
-            # الهاتف
-            try:
-                phone_field = page.locator("input[name='fields[1].content']").first
-                if phone_field.is_visible():
-                    phone_value = Config.PHONE.replace("+", "00").strip()
-                    phone_field.fill(phone_value)
-            except:
-                pass
+            # Dynamic fields
+            phone_value = Config.PHONE.replace("+", "00").strip()
             
-            # اختيار الفئة
-            try:
-                selects = page.locator("select").all()
-                for select in selects:
-                    options = select.locator("option").all()
-                    if len(options) > 1:
-                        select.select_option(index=1)
-                        break
-            except:
-                pass
+            # Try by label first
+            passport_id = self._find_input_id_by_label(page, "Passport")
+            if passport_id:
+                self._human_type(page, f"#{passport_id}", Config.PASSPORT, worker_logger)
+            else:
+                self._human_type(page, "input[name='fields[0].content']", Config.PASSPORT, worker_logger)
+            
+            phone_id = self._find_input_id_by_label(page, "Telephone")
+            if phone_id:
+                self._human_type(page, f"#{phone_id}", phone_value, worker_logger)
+            else:
+                self._human_type(page, "input[name='fields[1].content']", phone_value, worker_logger)
+            
+            # Category selection
+            self._select_category(page, worker_logger)
             
             with self.lock:
                 self.global_stats.forms_filled += 1
             
-            logger.info(f"[FORM] [W{worker_id}] Form filled successfully")
+            self.debug_manager.save_debug_html(page, "form_filled", session.worker_id)
+            worker_logger.info("✅ Form filled")
             return True
             
         except Exception as e:
-            logger.error(f"[FORM] [W{worker_id}] Form fill error: {e}")
+            worker_logger.error(f"❌ Form fill error: {e}")
             return False
-    
-    def submit_form_smart(self, page: Page, session: SessionState) -> bool:
-        """إرسال ذكي للنموذج"""
-        worker_id = session.worker_id
-        
-        for attempt in range(1, self.max_submit_attempts + 1):
-            logger.info(f"[SUBMIT] [W{worker_id}] Attempt {attempt}/{self.max_submit_attempts}")
+
+    def _find_input_id_by_label(self, page: Page, label_text: str) -> Optional[str]:
+        try:
+            return page.evaluate(f"""
+                () => {{
+                    const labels = Array.from(document.querySelectorAll('label'));
+                    const target = labels.find(l => l.innerText.toLowerCase().includes("{label_text.lower()}"));
+                    return target ? target.getAttribute('for') : null;
+                }}
+            """)
+        except:
+            return None
+
+    def _select_category(self, page: Page, worker_logger):
+        try:
+            purpose = Config.PURPOSE.lower() if hasattr(Config, 'PURPOSE') and Config.PURPOSE else "aupair"
+            purpose_value = Config.PURPOSE_VALUES.get(purpose, Config.DEFAULT_PURPOSE) if hasattr(Config, 'PURPOSE_VALUES') else "1"
             
+            select_elem = page.locator("select[name='fields[2].content']").first
+            if not select_elem.is_visible():
+                select_elem = page.locator("select").first
+            
+            if select_elem.is_visible():
+                select_elem.select_option(value=purpose_value)
+                # Trigger change event
+                page.evaluate("""
+                    const s = document.querySelector('select');
+                    if(s) { s.dispatchEvent(new Event('change', { bubbles: true })); }
+                """)
+        except Exception as e:
+            worker_logger.warning(f"Category selection warning: {e}")
+
+    def _fast_inject(self, page: Page, selector: str, value: str) -> bool:
+        try:
+            escaped_value = value.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
+            page.evaluate(f"""
+                const el = document.querySelector("{selector}");
+                if(el) {{
+                    el.value = "{escaped_value}";
+                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                }}
+            """)
+            return True
+        except:
+            return False
+
+    def _submit_form(self, page: Page, session: SessionState, worker_logger) -> bool:
+        """
+        [CRITICAL FIX] Hybrid submission: Enter key + Button click + Navigation handling
+        """
+        worker_id = session.worker_id
+        max_attempts = 15
+        
+        worker_logger.info(f"🚀 Starting submission sequence...")
+
+        for attempt in range(1, max_attempts + 1):
             try:
-                # 1. حل كابتشا الفورم إن وجدت
-                self.handle_captcha_safe(page, f"FORM_SUBMIT_{attempt}", session)
-                
-                # 2. الضغط على Enter
-                captcha_input = page.locator("input[name='captchaText']").first
-                if captcha_input.is_visible():
-                    captcha_input.press("Enter")
-                
-                # 3. انتظار النتيجة
-                time.sleep(3)
-                
-                # 4. تحليل النتيجة
+                # Check if already succeeded
                 content = page.content().lower()
-                
-                # النجاح
-                if "appointment number" in content or "successfully" in content:
-                    logger.critical(f"[SUCCESS] [W{worker_id}] 🏆 APPOINTMENT BOOKED!")
-                    
-                    self.debug_manager.save_critical_screenshot(page, "SUCCESS", worker_id)
-                    
-                    with self.lock:
-                        self.global_stats.success = True
-                    
-                    # إشعار
-                    try:
-                        send_success_notification(self.session_id, worker_id, None)
-                    except:
-                        pass
-                    
-                    return True
-                
-                # فشل صريح
-                if "beginnen sie den buchungsvorgang neu" in content:
-                    logger.error(f"[FAIL] [W{worker_id}] Session expired")
+                if any(term in content for term in ["appointment number", "termin nummer", "successfully", "ihre buchung"]):
+                    worker_logger.critical("🏆 ALREADY SUCCESS!")
+                    return self._handle_success_state(page, worker_id)
+
+                # Check for hard fail
+                if "beginnen sie den buchungsvorgang neu" in content or "ref-id:" in content:
+                    worker_logger.error("❌ Session expired (hard fail)")
+                    session.health = SessionHealth.CRITICAL
                     return False
-                
-                # فشل صامت - لا يزال في الفورم
-                if page.locator("input[name='lastname']").is_visible():
-                    logger.warning(f"[RETRY] [W{worker_id}] Silent failure - retrying")
+
+                # Ensure captcha is solved
+                captcha_input = page.locator("input[name='captchaText']").first
+                if not captcha_input.is_visible():
+                    worker_logger.warning("⚠️ No captcha input visible")
+                    # Maybe already submitted?
                     time.sleep(1)
                     continue
+
+                # Solve captcha if empty
+                current_val = captcha_input.input_value()
+                if not current_val or len(current_val) < 4:
+                    success, code, _ = self.solver.solve_from_page(page, f"SUBMIT_{attempt}")
+                    if not success or not code:
+                        worker_logger.warning("🔄 Captcha solve failed, refreshing...")
+                        self._refresh_captcha(page)
+                        time.sleep(1.5)
+                        continue
+                    
+                    captcha_input.fill(code)
+                    time.sleep(0.3)
+
+                # [THE FIX] Try multiple submission methods in order of reliability
+                submit_methods = [
+                    ("Enter Key", lambda: self._submit_by_enter(page, captcha_input)),
+                    ("Button Click", lambda: self._submit_by_button(page)),
+                    ("JS Submit", lambda: self._submit_by_js(page)),
+                ]
                 
-                # حالة غير معروفة
-                logger.warning(f"[UNKNOWN] [W{worker_id}] Unknown state")
-                time.sleep(1)
-                
-            except Exception as e:
-                logger.error(f"[ERROR] [W{worker_id}] Submit error: {e}")
-                time.sleep(1)
-        
-        logger.error(f"[FAIL] [W{worker_id}] All submit attempts failed")
-        return False
-    
-    # ==================== State Machine Execution ====================
-    
-    def execute_state_machine(self, page: Page, session: SessionState) -> bool:
-        """تنفيذ State Machine محسّنة"""
-        worker_id = session.worker_id
-        logger.info(f"[STATE] Starting State Machine [W{worker_id}]")
-        
-        # إعادة تعيين عداد الاتصال
-        self.connection_retries = 0
-        
-        while not self.stop_event.is_set():
-            try:
-                # === STATE: INIT ===
-                if self.current_state == BookingState.INIT:
-                    logger.info(f"[STATE] [W{worker_id}] State: INIT")
+                for method_name, method_func in submit_methods:
+                    worker_logger.info(f"⌨️ Attempt {attempt} using {method_name}...")
                     
-                    # توليد روابط الشهور
-                    month_urls = self.generate_month_urls()
-                    if not month_urls:
-                        logger.error("[STATE] No month URLs generated")
-                        self.current_state = BookingState.FAILED
-                        return False
-                    
-                    # تجربة الروابط بالترتيب
-                    for url in month_urls:
-                        if self.safe_navigate(page, url):
-                            self.global_stats.pages_loaded += 1
-                            self.current_state = BookingState.MONTH_SELECTION
-                            logger.info(f"[STATE] [W{worker_id}] INIT → MONTH_SELECTION")
-                            break
-                        else:
-                            self.connection_retries += 1
-                            if self.connection_retries >= self.max_connection_retries:
-                                logger.error("[STATE] Max connection retries reached")
-                                self.current_state = BookingState.CONNECTION_ERROR
-                                return False
-                            time.sleep(5)  # انتظار قبل إعادة المحاولة
-                    
-                    # إذا فشل كل شيء
-                    if self.current_state == BookingState.INIT:
-                        self.current_state = BookingState.CONNECTION_ERROR
-                        return False
-                
-                # === STATE: MONTH_SELECTION ===
-                elif self.current_state == BookingState.MONTH_SELECTION:
-                    logger.info(f"[STATE] [W{worker_id}] State: MONTH_SELECTION")
-                    
-                    # معالجة كابتشا الشهر
-                    self.handle_captcha_safe(page, "MONTH", session)
-                    
-                    # البحث عن أيام متاحة
-                    day_links = page.locator("a.arrow[href*='appointment_showDay']").all()
-                    
-                    if day_links:
-                        # الانتقال لأول يوم
-                        first_href = day_links[0].get_attribute("href")
-                        if first_href:
-                            base_domain = self.base_url.split("/extern")[0]
-                            day_url = f"{base_domain}/{first_href}"
-                            
-                            if self.safe_navigate(page, day_url):
-                                self.global_stats.days_found += 1
-                                self.current_state = BookingState.DAY_SELECTION
-                                logger.info(f"[STATE] [W{worker_id}] MONTH → DAY (found {len(day_links)} days)")
-                            else:
-                                self.current_state = BookingState.INIT  # نعيد من البداية
-                        else:
-                            self.current_state = BookingState.INIT
-                    else:
-                        # لا توجد أيام - نعود للبداية
-                        logger.info("[STATE] No days found, returning to INIT")
-                        self.current_state = BookingState.INIT
-                
-                # === STATE: DAY_SELECTION ===
-                elif self.current_state == BookingState.DAY_SELECTION:
-                    logger.info(f"[STATE] [W{worker_id}] State: DAY_SELECTION")
-                    
-                    # معالجة كابتشا اليوم
-                    self.handle_captcha_safe(page, "DAY", session)
-                    
-                    # البحث عن أوقات متاحة
-                    time_links = page.locator("a.arrow[href*='appointment_showForm']").all()
-                    
-                    if time_links:
-                        # الانتقال لأول وقت
-                        first_href = time_links[0].get_attribute("href")
-                        if first_href:
-                            base_domain = self.base_url.split("/extern")[0]
-                            time_url = f"{base_domain}/{first_href}"
-                            
-                            if self.safe_navigate(page, time_url):
-                                self.global_stats.slots_found += len(time_links)
-                                self.current_state = BookingState.TIME_SELECTION
-                                logger.info(f"[STATE] [W{worker_id}] DAY → TIME (found {len(time_links)} slots)")
-                            else:
-                                self.current_state = BookingState.INIT
-                        else:
-                            self.current_state = BookingState.INIT
-                    else:
-                        # لا توجد أوقات - نعود للشهر
-                        logger.info("[STATE] No time slots found, returning to INIT")
-                        self.current_state = BookingState.INIT
-                
-                # === STATE: TIME_SELECTION ===
-                elif self.current_state == BookingState.TIME_SELECTION:
-                    logger.info(f"[STATE] [W{worker_id}] State: TIME_SELECTION (POINT OF NO RETURN)")
-                    
-                    # معالجة كابتشا الوقت
-                    self.handle_captcha_safe(page, "TIME", session)
-                    
-                    # التحقق من وجود الفورم
-                    if page.locator("input[name='lastname']").count() > 0:
-                        self.current_state = BookingState.FORM_READY
-                        logger.info(f"[STATE] [W{worker_id}] TIME → FORM_READY")
-                    else:
-                        logger.error("[STATE] Form not found after time selection")
-                        self.current_state = BookingState.INIT
-                
-                # === STATE: FORM_READY ===
-                elif self.current_state == BookingState.FORM_READY:
-                    logger.info(f"[STATE] [W{worker_id}] State: FORM_READY")
-                    
-                    # ملء النموذج
-                    if self.fill_booking_form_humanized(page, session):
-                        self.current_state = BookingState.FORM_SUBMITTING
-                        logger.info(f"[STATE] [W{worker_id}] FORM_READY → FORM_SUBMITTING")
-                    else:
-                        logger.error("[STATE] Form fill failed")
-                        self.current_state = BookingState.FAILED
-                        return False
-                
-                # === STATE: FORM_SUBMITTING ===
-                elif self.current_state == BookingState.FORM_SUBMITTING:
-                    logger.info(f"[STATE] [W{worker_id}] State: FORM_SUBMITTING")
-                    
-                    # الإرسال الذكي
-                    if self.submit_form_smart(page, session):
-                        self.current_state = BookingState.SUCCESS
-                        logger.info(f"[STATE] [W{worker_id}] FORM_SUBMITTING → SUCCESS")
-                        return True
-                    else:
-                        # فشل الإرسال
-                        self.form_submit_attempts += 1
+                    try:
+                        # Use expect_navigation to catch the redirect
+                        with page.expect_navigation(timeout=10000, wait_until="domcontentloaded"):
+                            method_func()
                         
-                        if self.form_submit_attempts >= 3:
-                            logger.error("[STATE] Max form submit attempts reached")
-                            self.current_state = BookingState.FAILED
-                            return False
-                        else:
-                            # إعادة المحاولة بدون تغيير الحالة
-                            logger.info(f"[STATE] Retry submit ({self.form_submit_attempts}/3)")
-                            continue
+                        # Check result after navigation
+                        time.sleep(0.5)
+                        if self._check_success(page, worker_logger):
+                            return True
+                            
+                    except Exception as nav_err:
+                        worker_logger.debug(f"{method_name} navigation: {nav_err}")
+                        # Check if success anyway (no navigation case)
+                        if self._check_success(page, worker_logger):
+                            return True
                 
-                # === STATE: SUCCESS ===
-                elif self.current_state == BookingState.SUCCESS:
-                    logger.info(f"[STATE] [W{worker_id}] State: SUCCESS")
-                    return True
-                
-                # === STATE: FAILED ===
-                elif self.current_state == BookingState.FAILED:
-                    logger.info(f"[STATE] [W{worker_id}] State: FAILED")
-                    return False
-                
-                # === STATE: CONNECTION_ERROR ===
-                elif self.current_state == BookingState.CONNECTION_ERROR:
-                    logger.error(f"[STATE] [W{worker_id}] State: CONNECTION_ERROR")
-                    return False
-                
-                # انتظار قصير بين الحالات
-                time.sleep(1)
-                
+                # If we're still here, check if bounced back to form
+                if page.locator("input[name='lastname']").is_visible():
+                    worker_logger.warning(f"↩️ Bounced back (Attempt {attempt})")
+                    
+                    # Check if form was cleared
+                    lastname_val = page.locator("input[name='lastname']").input_value()
+                    if not lastname_val:
+                        worker_logger.info("📝 Re-filling cleared form...")
+                        self._fill_booking_form(page, session, worker_logger)
+                    
+                    self._refresh_captcha(page)
+                    time.sleep(1)
+                    continue
+
             except Exception as e:
-                logger.error(f"[STATE] [W{worker_id}] State Machine error: {e}")
-                
-                # في حالة خطأ، نعود للبداية لكن مع حد أقصى
-                if self.connection_retries >= self.max_connection_retries:
-                    self.current_state = BookingState.CONNECTION_ERROR
-                    return False
-                
-                self.current_state = BookingState.INIT
-                time.sleep(3)
+                worker_logger.error(f"⚠️ Submit error: {e}")
+                time.sleep(1)
         
         return False
-    
-    # ==================== Single Session Mode ====================
-    
+
+    def _submit_by_enter(self, page: Page, captcha_input):
+        """Method 1: Press Enter on captcha field"""
+        captcha_input.focus()
+        captcha_input.press("Enter")
+
+    def _submit_by_button(self, page: Page):
+        """Method 2: Click submit button"""
+        submit_btn = page.locator("""
+            #appointment_newAppointmentForm_appointment_addAppointment,
+            input[name='action:appointment_addAppointment'],
+            input[type='submit'][value='Submit']
+        """).first
+        submit_btn.click(timeout=5000)
+
+    def _submit_by_js(self, page: Page):
+        """Method 3: JavaScript form submit"""
+        page.evaluate("""
+            const form = document.getElementById('appointment_newAppointmentForm');
+            if(form) {
+                form.action = "extern/appointment_addAppointment.do";
+                form.submit();
+            } else {
+                document.getElementsByName('appointment_newAppointmentForm')[0]?.submit();
+            }
+        """)
+
+    def _refresh_captcha(self, page: Page):
+        """Refresh captcha image"""
+        try:
+            refresh_btn = page.locator("#appointment_newAppointmentForm_form_newappointment_refreshcaptcha").first
+            if refresh_btn.is_visible():
+                refresh_btn.click()
+            else:
+                self.solver.reload_captcha(page)
+        except:
+            pass
+
+    def _check_success(self, page: Page, worker_logger) -> bool:
+        """Check if submission succeeded"""
+        try:
+            content = page.content().lower()
+            
+            success_terms = ["appointment number", "termin nummer", "successfully booked", "ihre buchung"]
+            for term in success_terms:
+                if term in content:
+                    worker_logger.critical(f"🏆 SUCCESS! Found: '{term}'")
+                    return True
+            
+            return False
+        except:
+            return False
+
+    def _handle_success_state(self, page: Page, worker_id: int) -> bool:
+        """Handle success state"""
+        self.global_stats.success = True
+        self.debug_manager.save_critical_screenshot(page, "VICTORY", worker_id)
+        self.debug_manager.save_debug_html(page, "SUCCESS", worker_id)
+        
+        try:
+            send_success_notification(self.session_id, worker_id)
+        except:
+            pass
+        
+        self.stop_event.set()
+        return True
+
     def _run_single_session(self, browser: Browser, worker_id: int):
-        """Single session mode"""
+        """Main execution flow - Fixed"""
         worker_logger = logging.getLogger(f"EliteSniperV2.Single")
         worker_logger.info("[START] Single session mode")
         
-        # لا بروكسي للاختبار
         proxy = None
-        
-        # إنشاء الجلسة
         context, page, session = self.create_context(browser, worker_id, proxy)
         session.role = SessionRole.SCOUT
         
         try:
-            # تنفيذ State Machine
-            success = self.execute_state_machine(page, session)
+            max_cycles = 100
             
-            if success:
-                worker_logger.critical("[SUCCESS] Appointment booked!")
-            else:
-                worker_logger.error("[FAILED] Booking failed")
+            for cycle in range(max_cycles):
+                if self.stop_event.is_set():
+                    break
                 
+                mode = self.get_mode()
+                worker_logger.info(f"[CYCLE {cycle+1}] Mode: {mode}")
+                
+                month_urls = self.generate_month_urls()
+                
+                for i, url in enumerate(month_urls):
+                    if self.stop_event.is_set():
+                        break
+                    
+                    # Step 1: Month page
+                    try:
+                        page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                        session.touch()
+                        self.global_stats.pages_loaded += 1
+                        worker_logger.info(f"[MONTH] Loaded")
+                    except Exception as e:
+                        worker_logger.warning(f"[NAV ERROR] {e}")
+                        continue
+                    
+                    if not self.validate_session_health(page, session, "MONTH"):
+                        context.close()
+                        context, page, session = self.create_context(browser, worker_id, proxy)
+                        break
+                    
+                    # Handle month captcha
+                    has_captcha, _ = self.solver.safe_captcha_check(page, "MONTH")
+                    if has_captcha:
+                        success, code, status = self.solver.solve_from_page(page, "MONTH")
+                        if success and code:
+                            self.solver.submit_captcha(page, "enter")
+                            page.wait_for_timeout(2000)
+                            self.global_stats.captchas_solved += 1
+                            session.mark_captcha_solved()
+                        else:
+                            self.global_stats.captchas_failed += 1
+                            continue
+                    
+                    # Check for days
+                    content = page.content().lower()
+                    if "no appointments" in content:
+                        continue
+                    
+                    day_links = page.locator("a.arrow[href*='appointment_showDay']").all()
+                    if not day_links:
+                        continue
+                    
+                    worker_logger.critical(f"[FOUND] {len(day_links)} days!")
+                    self.global_stats.days_found += len(day_links)
+                    
+                    # Step 2: Day page
+                    first_href = day_links[0].get_attribute("href")
+                    if not first_href:
+                        continue
+                    
+                    base_domain = self.base_url.split("/extern")[0]
+                    day_url = f"{base_domain}/{first_href}" if not first_href.startswith("http") else first_href
+                    
+                    try:
+                        page.goto(day_url, timeout=20000, wait_until="domcontentloaded")
+                        session.touch()
+                    except Exception as e:
+                        worker_logger.error(f"[DAY ERROR] {e}")
+                        continue
+                    
+                    # Look for time slots
+                    slot_links = page.locator("a.arrow[href*='appointment_showForm']").all()
+                    if not slot_links:
+                        continue
+                    
+                    worker_logger.critical(f"[SLOTS] {len(slot_links)} time slots!")
+                    self.global_stats.slots_found += len(slot_links)
+                    
+                    # Step 3: Form page
+                    slot_href = slot_links[0].get_attribute("href")
+                    if not slot_href:
+                        continue
+                    
+                    slot_url = f"{base_domain}/{slot_href}" if not slot_href.startswith("http") else slot_href
+                    
+                    try:
+                        page.goto(slot_url, timeout=20000, wait_until="domcontentloaded")
+                        session.touch()
+                    except Exception as e:
+                        worker_logger.error(f"[FORM ERROR] {e}")
+                        continue
+                    
+                    # [CRITICAL] Fill form FIRST, then captcha, then submit immediately
+                    worker_logger.info("[FORM] Step 1: Filling form...")
+                    if not self._fill_booking_form(page, session, worker_logger):
+                        continue
+                    
+                    worker_logger.info("[FORM] Step 2: Solving captcha...")
+                    has_captcha, _ = self.solver.safe_captcha_check(page, "FORM")
+                    
+                    if has_captcha:
+                        success, code, status = self.solver.solve_from_page(page, "FORM_SUBMIT")
+                        if not success or not code:
+                            worker_logger.warning("[CAPTCHA] Failed")
+                            continue
+                        self.global_stats.captchas_solved += 1
+                        session.mark_captcha_solved()
+                    
+                    worker_logger.info("[FORM] Step 3: Submitting...")
+                    if self._submit_form(page, session, worker_logger):
+                        return  # Success!
+                
+                # Sleep between cycles
+                sleep_time = self.get_sleep_interval()
+                time.sleep(sleep_time)
+                
+                # Session rebirth if old
+                if session.age() > Config.SESSION_MAX_AGE:
+                    context.close()
+                    context, page, session = self.create_context(browser, worker_id, proxy)
+                    
         except Exception as e:
-            worker_logger.error(f"[FATAL] Session error: {e}", exc_info=True)
-        
+            worker_logger.error(f"[FATAL] {e}", exc_info=True)
         finally:
             try:
                 context.close()
             except:
                 pass
-            worker_logger.info("[END] Session closed")
-    
-    # ==================== Main Entry Point ====================
-    
+
     def run(self) -> bool:
-        """Main execution"""
+        """Main entry point"""
         logger.info("=" * 70)
         logger.info(f"[ELITE SNIPER V{self.VERSION}] - STARTING")
-        logger.info("[MODE] Single Session")
         logger.info(f"[ATTACK TIME] {Config.ATTACK_HOUR}:00 AM {Config.TIMEZONE}")
-        logger.info(f"[CURRENT TIME] Aden: {self.get_current_time_aden().strftime('%H:%M:%S')}")
         logger.info("=" * 70)
         
         try:
-            # Startup notification
-            send_alert(
-                f"[Elite Sniper v{self.VERSION} Started]\n"
-                f"Session: {self.session_id}\n"
-                f"Mode: Single Session\n"
-                f"Attack: {Config.ATTACK_HOUR}:00 AM Aden"
-            )
+            send_alert(f"[Elite Sniper v{self.VERSION} Started]")
             
             with sync_playwright() as p:
-                # Launch browser
                 browser = p.chromium.launch(
                     headless=Config.HEADLESS,
                     args=Config.BROWSER_ARGS,
                     timeout=60000
                 )
                 
-                logger.info("[BROWSER] Launched successfully")
+                self._run_single_session(browser, 1)
                 
-                # Single session
-                worker_id = 1
-                
-                try:
-                    self._run_single_session(browser, worker_id)
-                except Exception as e:
-                    logger.error(f"[SESSION ERROR] {e}")
-                
-                # Cleanup
                 self.ntp_sync.stop_background_sync()
                 browser.close()
-                
-                # Save stats
-                final_stats = self.global_stats.to_dict()
-                self.debug_manager.save_stats(final_stats, "final_stats.json")
                 
                 if self.global_stats.success:
                     self._handle_success()
@@ -668,45 +728,27 @@ class EliteSniperV2:
                 else:
                     self._handle_completion()
                     return False
-                
+                    
         except KeyboardInterrupt:
-            logger.info("\n[STOP] Manual stop")
+            logger.info("[STOP] Manual stop")
             self.stop_event.set()
-            self.ntp_sync.stop_background_sync()
-            send_alert("⏸️ Elite Sniper stopped manually")
             return False
-            
         except Exception as e:
-            logger.error(f"💀 Critical error: {e}", exc_info=True)
-            send_alert(f"🚨 Critical error: {str(e)[:200]}")
+            logger.error(f"💀 Critical error: {e}")
             return False
-    
+
     def _handle_success(self):
-        """Handle success"""
         logger.info("\n" + "=" * 70)
-        logger.info("[SUCCESS] BOOKING SUCCESSFUL!")
+        logger.info("[SUCCESS] MISSION ACCOMPLISHED!")
         logger.info("=" * 70)
-        
-        runtime = (datetime.datetime.now() - self.start_time).total_seconds()
-        
-        send_alert(
-            f"ELITE SNIPER V2.0 - SUCCESS!\n"
-            f"[+] Appointment booked!\n"
-            f"Session: {self.session_id}\n"
-            f"Runtime: {runtime:.0f}s"
-        )
-    
+        send_alert("ELITE SNIPER - SUCCESS! Appointment booked!")
+
     def _handle_completion(self):
-        """Handle completion"""
         logger.info("\n" + "=" * 70)
-        logger.info("[STOP] Session completed")
+        logger.info("[STOP] Completed without booking")
         logger.info("=" * 70)
-        
-        runtime = (datetime.datetime.now() - self.start_time).total_seconds()
-        logger.info(f"[TIME] Runtime: {runtime:.0f}s")
 
 
-# Entry point
 if __name__ == "__main__":
     sniper = EliteSniperV2()
     success = sniper.run()
