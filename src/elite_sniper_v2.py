@@ -1943,8 +1943,8 @@ class EliteSniperV2:
     
     def _submit_form(self, page: Page, session: SessionState, worker_logger) -> bool:
         """
-        [PATCHED v2] Submit form using ENTER KEY with Navigation Handling.
-        Fixes 'Unable to retrieve content' error by waiting for navigation.
+        [FINAL PATCH] Submit form - Simple and Reliable version.
+        Fixes both navigation errors AND captcha solving issues.
         """
         worker_id = session.worker_id
         max_attempts = 10
@@ -1953,57 +1953,77 @@ class EliteSniperV2:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                # 1. التحقق من وجود حقل الكابتشا
-                captcha_input = page.locator("input[name='captchaText']").first
-                if not captcha_input.is_visible():
-                    # ربما انتقلنا بالفعل؟ نتحقق
-                    if self._check_submission_success(page, worker_id): 
+                worker_logger.info(f"📋 Submission Attempt {attempt}/{max_attempts}")
+                
+                # 1. First check if we already succeeded
+                try:
+                    if self._check_submission_success(page, worker_id):
                         return True
-                    worker_logger.warning("⚠️ Captcha input not found (and not success)!")
+                except:
+                    pass
+                
+                # 2. التحقق من وجود حقل الكابتشا
+                captcha_input = page.locator("input[name='captchaText']").first
+                if not captcha_input.is_visible(timeout=2000):
+                    worker_logger.warning("⚠️ Captcha input not found!")
+                    # Check one more time for success
+                    try:
+                        if self._check_submission_success(page, worker_id):
+                            return True
+                    except:
+                        pass
                     return False
 
-                # 2. حل الكابتشا
-                success, code, _ = self.solver.solve_from_page(page, f"SUBMIT_{attempt}")
+                # 3. حل الكابتشا (استخدام الدالة الموثوقة)
+                worker_logger.info("🔍 Solving captcha...")
+                success, code, captcha_status = self.solver.solve_from_page(
+                    page, 
+                    f"SUBMIT_{attempt}",
+                    session_age=int(time.time() - session.created_at),
+                    attempt=attempt,
+                    max_attempts=1
+                )
                 
                 if not success or not code:
-                    worker_logger.warning("🔄 Captcha solve failed, refreshing image...")
+                    worker_logger.warning(f"🔄 Captcha solve failed ({captcha_status}), refreshing image...")
                     self.solver.reload_captcha(page)
-                    time.sleep(1)
+                    time.sleep(1.5)
                     continue
 
-                # 3. الإرسال (Enter) مع انتظار الانتقال
-                worker_logger.info(f"⌨️ Typing '{code}' and pressing ENTER...")
+                # 4. كتابة الكابتشا والضغط على ENTER (الطريقة الموثوقة)
+                worker_logger.info(f"⌨️ Typing captcha '{code}' and pressing ENTER...")
                 
+                # التركيز وكتابة الكابتشا
                 captcha_input.click()
+                captcha_input.fill("")  # تنظيف أولاً
                 captcha_input.fill(code)
-                time.sleep(0.2)
+                time.sleep(0.3)
                 
-                # 🔥 التغيير الجوهري هنا: نضغط وننتظر الانتقال
-                try:
-                    with page.expect_navigation(timeout=5000):
-                        page.keyboard.press("Enter")
-                except:
-                    # إذا انتهى الوقت ولم تنتقل الصفحة، هذا يعني أن الكابتشا خطأ أو السيرفر بطيء
-                    # لا بأس، سنكمل الفحص
-                    pass
+                # الضغط على ENTER
+                page.keyboard.press("Enter")
                 
-                # 4. انتظار الاستقرار (Network Idle)
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=5000)
-                except: 
-                    pass
-
-                # 5. الفحص الآمن للمحتوى
-                try:
-                    content = page.content().lower()
-                except Exception as e:
-                    # إذا فشل قراءة المحتوى، ننتظر قليلاً ونحاول مرة أخرى
-                    worker_logger.warning(f"⚠️ Page unstable, waiting... ({e})")
-                    time.sleep(2)
-                    content = page.content().lower()
-
-                # 6. تحليل النتيجة
-                if "appointment number" in content or "termin nummer" in content:
+                # 5. انتظار ذكي
+                wait_time = 3.0  # انتظار أساسي
+                if self.solver.manual_only:
+                    wait_time = 5.0  # وقت أطول للنمط اليدوي
+                
+                time.sleep(wait_time)
+                
+                # 6. محاولة قراءة المحتوى بمرونة
+                content = ""
+                for retry in range(3):
+                    try:
+                        content = page.content().lower()
+                        break
+                    except Exception as e:
+                        if retry < 2:
+                            worker_logger.debug(f"📄 Page content read failed, retrying... ({e})")
+                            time.sleep(1)
+                        else:
+                            worker_logger.warning(f"📄 Could not read page content: {e}")
+                
+                # 7. التحقق من النجاح
+                if content and ("appointment number" in content or "termin nummer" in content):
                     worker_logger.critical("🏆 VICTORY! APPOINTMENT SECURED!")
                     self.global_stats.success = True
                     self.debug_manager.save_critical_screenshot(page, "VICTORY", worker_id)
@@ -2015,23 +2035,40 @@ class EliteSniperV2:
                     self.stop_event.set()
                     return True
                 
-                # هل عدنا لنفس الصفحة؟
-                if page.locator("input[name='lastname']").is_visible():
-                    worker_logger.warning(f"↩️ Bounced back (Attempt {attempt}). Retrying...")
-                    self._fill_booking_form(page, session, worker_logger)
+                # 8. التحقق من عودة النموذج (كابتشا خطأ)
+                if page.locator("input[name='lastname']").is_visible(timeout=2000):
+                    worker_logger.warning(f"↩️ Bounced back to form (Attempt {attempt})")
+                    
+                    # إعادة تعبئة النموذج فقط إذا كان الوضع اليدوي
+                    if self.solver.manual_only:
+                        self._fill_booking_form(page, session, worker_logger)
+                    
+                    # تحديث الكابتشا
                     self.solver.reload_captcha(page)
-                    time.sleep(1)
+                    time.sleep(1.5)
                     continue
                 
-                # صفحة خطأ
-                if "error" in content:
+                # 9. إذا لم نعد للنموذج ولم نحصل على نجاح، تحقق من صفحة الخطأ
+                if content and ("error" in content or "fehler" in content):
                     worker_logger.error("❌ Server Error Page.")
                     return False
+                    
+                # 10. إذا لم يكن أي من الحالات السابقة، ربما نحتاج إلى انتظار أطول
+                worker_logger.warning(f"⚠️ Uncertain result, waiting longer...")
+                time.sleep(2)
+                
+                # تحقق مرة أخرى
+                try:
+                    if self._check_submission_success(page, worker_id):
+                        return True
+                except:
+                    pass
 
             except Exception as e:
-                worker_logger.error(f"⚠️ Submit loop error: {e}")
-                time.sleep(1)
+                worker_logger.error(f"⚠️ Submit attempt {attempt} error: {e}")
+                time.sleep(1.5)
         
+        worker_logger.error(f"💀 All {max_attempts} submission attempts failed")
         return False
     
     def _handle_success(self):
