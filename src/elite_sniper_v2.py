@@ -1943,8 +1943,8 @@ class EliteSniperV2:
     
     def _submit_form(self, page: Page, session: SessionState, worker_logger) -> bool:
         """
-        [PATCHED] Submit form using ENTER KEY on Captcha field.
-        This is the most reliable method as it triggers the form's native submit handler.
+        [PATCHED v2] Submit form using ENTER KEY with Navigation Handling.
+        Fixes 'Unable to retrieve content' error by waiting for navigation.
         """
         worker_id = session.worker_id
         max_attempts = 10
@@ -1956,64 +1956,74 @@ class EliteSniperV2:
                 # 1. التحقق من وجود حقل الكابتشا
                 captcha_input = page.locator("input[name='captchaText']").first
                 if not captcha_input.is_visible():
-                    worker_logger.warning("⚠️ Captcha input not found!")
+                    # ربما انتقلنا بالفعل؟ نتحقق
+                    if self._check_submission_success(page, worker_id): 
+                        return True
+                    worker_logger.warning("⚠️ Captcha input not found (and not success)!")
                     return False
 
                 # 2. حل الكابتشا
-                # نستخدم الحل البسيط هنا لأننا داخل حلقة الموت
                 success, code, _ = self.solver.solve_from_page(page, f"SUBMIT_{attempt}")
                 
                 if not success or not code:
-                    # إذا فشل الحل، نضغط زر تحديث الصورة ونحاول مرة أخرى
                     worker_logger.warning("🔄 Captcha solve failed, refreshing image...")
                     self.solver.reload_captcha(page)
                     time.sleep(1)
                     continue
 
-                # 3. كتابة الكود والضغط على ENTER (الحركة السحرية)
-                worker_logger.info(f"⌨️ Typing captcha '{code}' and pressing ENTER...")
+                # 3. الإرسال (Enter) مع انتظار الانتقال
+                worker_logger.info(f"⌨️ Typing '{code}' and pressing ENTER...")
                 
                 captcha_input.click()
                 captcha_input.fill(code)
                 time.sleep(0.2)
-                page.keyboard.press("Enter") # 🔥 الضربة القاضية
                 
-                # 4. انتظار النتيجة (حاسم جداً)
-                # ننتظر إما ظهور رقم الموعد أو عودة النموذج (فشل)
+                # 🔥 التغيير الجوهري هنا: نضغط وننتظر الانتقال
                 try:
-                    # ننتظر أي تغيير في الصفحة
-                    page.wait_for_load_state("networkidle", timeout=5000)
-                except: pass
+                    with page.expect_navigation(timeout=5000):
+                        page.keyboard.press("Enter")
+                except:
+                    # إذا انتهى الوقت ولم تنتقل الصفحة، هذا يعني أن الكابتشا خطأ أو السيرفر بطيء
+                    # لا بأس، سنكمل الفحص
+                    pass
+                
+                # 4. انتظار الاستقرار (Network Idle)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except: 
+                    pass
 
-                content = page.content().lower()
+                # 5. الفحص الآمن للمحتوى
+                try:
+                    content = page.content().lower()
+                except Exception as e:
+                    # إذا فشل قراءة المحتوى، ننتظر قليلاً ونحاول مرة أخرى
+                    worker_logger.warning(f"⚠️ Page unstable, waiting... ({e})")
+                    time.sleep(2)
+                    content = page.content().lower()
 
-                # 5. تحليل النتيجة
+                # 6. تحليل النتيجة
                 if "appointment number" in content or "termin nummer" in content:
                     worker_logger.critical("🏆 VICTORY! APPOINTMENT SECURED!")
                     self.global_stats.success = True
-                    
-                    # حفظ التوثيق
                     self.debug_manager.save_critical_screenshot(page, "VICTORY", worker_id)
                     try:
-                        # استدعاء دالة الإشعار الموجودة في الملف الأصلي
                         from .notifier import send_success_notification
                         send_success_notification(self.session_id, worker_id)
-                    except: pass
-                    
+                    except: 
+                        pass
                     self.stop_event.set()
                     return True
                 
-                # هل عدنا لنفس الصفحة؟ (كابتشا خطأ أو رفض صامت)
+                # هل عدنا لنفس الصفحة؟
                 if page.locator("input[name='lastname']").is_visible():
-                    worker_logger.warning(f"↩️ Bounced back to form (Attempt {attempt}). Retrying...")
-                    # مهم: نعيد تعبئة الحقول لأن بعض المواقع تمسحها عند الخطأ
+                    worker_logger.warning(f"↩️ Bounced back (Attempt {attempt}). Retrying...")
                     self._fill_booking_form(page, session, worker_logger)
-                    # نحدث الكابتشا لضمان صورة جديدة
                     self.solver.reload_captcha(page)
                     time.sleep(1)
                     continue
                 
-                # صفحة خطأ صريحة
+                # صفحة خطأ
                 if "error" in content:
                     worker_logger.error("❌ Server Error Page.")
                     return False
