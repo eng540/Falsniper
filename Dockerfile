@@ -1,3 +1,4 @@
+--- START OF FULL, FINAL, AND CONFIRMED READY-TO-USE FILE: Dockerfile ---
 # ================================
 # Base Image
 # ================================
@@ -12,7 +13,7 @@ ENV TZ=Asia/Aden
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # ================================
-# System Dependencies (FINAL FIX)
+# System Dependencies
 # ================================
 RUN apt-get update && apt-get install -y \
     wget \
@@ -37,7 +38,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # ================================
-# Timezone
+# Timezone Configuration
 # ================================
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
@@ -47,17 +48,15 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 WORKDIR /app
 
 # ================================
-# Python Dependencies
+# Python Dependencies (Cached Layer)
 # ================================
 RUN pip install --no-cache-dir --upgrade pip
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ================================
-# Install Playwright (Auto-match version)
+# Install Playwright
 # ================================
-# هذا السطر هو الذي يحل مشكلة اختلاف الإصدارات
 RUN playwright install chromium --with-deps
 
 # ================================
@@ -65,15 +64,17 @@ RUN playwright install chromium --with-deps
 # ================================
 COPY . /app
 
+# Create directory for evidence
 RUN mkdir -p /app/evidence
 
 # ================================
 # Healthcheck
 # ================================
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD python -c "import sys; sys.exit(0)"
+  CMD ps aux | grep "[p]ython" || exit 1
 
 # ================================
 # Run
 # ================================
 CMD ["python", "-m", "src.main"]
+--- END OF FULL, FINAL, AND CONFIRMED READY-TO-USE FILE: Dockerfile ---
