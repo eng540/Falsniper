@@ -1,4 +1,4 @@
---- START OF FULL, FINAL, AND CONFIRMED READY-TO-USE FILE: Dockerfile ---
+#--- START OF FULL, FINAL, AND CONFIRMED READY-TO-USE FILE: Dockerfile ---
 # ================================
 # Base Image
 # ================================
@@ -77,4 +77,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 # Run
 # ================================
 CMD ["python", "-m", "src.main"]
---- END OF FULL, FINAL, AND CONFIRMED READY-TO-USE FILE: Dockerfile ---
+#--- END OF FULL, FINAL, AND CONFIRMED READY-TO-USE FILE: Dockerfile ---
