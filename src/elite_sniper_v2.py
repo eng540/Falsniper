@@ -1,5 +1,6 @@
 """
 Elite Sniper v2.0 - Production-Grade Multi-Session Appointment Booking System
+FINAL VERSION WITH MULTI-LANGUAGE SUCCESS DETECTION
 
 Integrates best features from:
 - Elite Sniper: Multi-session architecture, Scout/Attacker pattern, Scheduled activation
@@ -11,7 +12,7 @@ Architecture:
 - Intelligent session lifecycle management
 - Production-grade error handling and recovery
 
-Version: 2.0.0
+Version: 2.0.0 FINAL
 """
 
 import time
@@ -56,16 +57,17 @@ logger = logging.getLogger("EliteSniperV2")
 class EliteSniperV2:
     """
     Production-Grade Multi-Session Appointment Booking System
+    FINAL VERSION WITH MULTI-LANGUAGE SUCCESS DETECTION
     """
     
-    VERSION = "2.0.0"
+    VERSION = "2.0.0 FINAL"
     
     def __init__(self, run_mode: str = "AUTO"):
-        """Initialize Elite Sniper v2.0"""
+        """Initialize Elite Sniper v2.0 FINAL"""
         self.run_mode = run_mode
         
         logger.info("=" * 70)
-        logger.info(f"[INIT] ELITE SNIPER V{self.VERSION} - INITIALIZING")
+        logger.info(f"[INIT] ELITE SNIPER {self.VERSION} - INITIALIZING")
         logger.info(f"[MODE] Running Mode: {self.run_mode}")
         logger.info("=" * 70)
         
@@ -625,10 +627,11 @@ class EliteSniperV2:
     
     def submit_form(self, page: Page, session: SessionState) -> bool:
         """
-        🔥 FIXED SUBMISSION - WITH EXPECT_NAVIGATION AND SMART RETRY
+        FINAL VERSION: Multi-Language Success Detection
+        Detects real success pages in German and English, distinguishes from error pages
         """
         worker_id = session.worker_id
-        logger.info(f"[W{worker_id}] === FINAL SUBMISSION STARTED ===")
+        logger.info(f"[W{worker_id}] === FINAL SUBMISSION (MULTI-LANGUAGE DETECTION) ===")
         
         max_attempts = 15
         
@@ -636,7 +639,7 @@ class EliteSniperV2:
             try:
                 logger.info(f"[W{worker_id}] [SUBMIT {attempt}/{max_attempts}]")
                 
-                # 1. Solve captcha
+                # 1. حل الكابتشا
                 success, code, _ = self.solver.solve_from_page(page, f"SUBMIT_{attempt}")
                 
                 if not success or not code:
@@ -645,80 +648,293 @@ class EliteSniperV2:
                     time.sleep(1.5)
                     continue
                 
-                # 2. Fill captcha field
+                # 2. تعبئة الكابتشا
                 captcha_input = page.locator("input[name='captchaText']").first
                 captcha_input.click()
                 captcha_input.fill("")
                 captcha_input.type(code, delay=10)
                 time.sleep(0.2)
                 
-                # 🔥 CRITICAL FIX 1: Use expect_navigation
+                # 3. الإرسال مع انتظار التنقل
                 try:
                     with page.expect_navigation(timeout=15000):
                         page.keyboard.press("Enter")
                     logger.info(f"[W{worker_id}] Navigation captured successfully")
                 except Exception as nav_error:
                     logger.debug(f"[W{worker_id}] Navigation timeout: {nav_error}")
-                    time.sleep(3)  # Fallback wait
+                    time.sleep(3)
                 
-                # 3. Check for success with expanded indicators
-                content = page.content().lower()
+                # ===============================================
+                # 🔴 التحقق الدقيق من صفحة الخطأ أولاً
+                # ===============================================
+                content = page.content()
+                content_lower = content.lower()
                 
-                # 🔥 CRITICAL FIX 2: Expanded success indicators
-                success_indicators = [
-                    "appointment number",
-                    "termin wurde gebucht",
-                    "ihre buchung", 
-                    "successfully",
-                    "confirmation",
-                    "vielen dank",
-                    "booking confirmed",
-                    "appointment confirmed",
-                    "terminnummer",
-                    "buchungsnummer",
-                    "your appointment",
-                    "ihr termin",
-                    "erfolgreich gebucht",
-                    "bestaetigung",
-                    "appointment booked",
-                    "buchung erfolgreich",
-                    "numéro de rendez-vous",
-                    "votre rendez-vous",
-                    "s'appelle avec succès"
+                # 🚨 اكتشاف صفحة الخطأ أولاً (جميع اللغات)
+                error_patterns = [
+                    # الإنجليزية
+                    "an error occurred while processing your appointment",
+                    "ref-id:",
+                    "error occurred",
+                    "processing error",
+                    "your browser open for a very long time",
+                    "changed the address manually",
+                    
+                    # الألمانية
+                    "beginnen sie den buchungsvorgang neu",
+                    "fehler bei der verarbeitung",
+                    "es ist ein fehler aufgetreten",
+                    
+                    # مشتركة
+                    "ref-id:",  # المؤشر القاطع للخطأ
                 ]
                 
-                for indicator in success_indicators:
-                    if indicator in content:
-                        logger.critical(f"[W{worker_id}] 🎉 SUCCESS! Found: '{indicator}'")
+                for error_pattern in error_patterns:
+                    if error_pattern in content_lower:
+                        logger.error(f"[W{worker_id}] ❌ ERROR PAGE DETECTED: '{error_pattern}'")
                         
-                        # Save evidence
-                        self.debug_manager.save_critical_screenshot(page, "SUCCESS", worker_id)
-                        self.debug_manager.save_debug_html(page, "SUCCESS", worker_id)
+                        # استخراج ref-id إن وجد
+                        ref_id_match = re.search(r'ref-id:\s*([A-F0-9]+)', content, re.IGNORECASE)
+                        if ref_id_match:
+                            logger.error(f"[W{worker_id}] Ref-ID: {ref_id_match.group(1)}")
                         
-                        # Notify
+                        # حفظ أدلة الخطأ
+                        self.debug_manager.save_critical_screenshot(page, "ERROR_PAGE", worker_id)
+                        self.debug_manager.save_debug_html(page, "ERROR_PAGE", worker_id)
+                        
+                        # إرسال تنبيه بالخطأ
                         try:
-                            send_success_notification(
-                                self.session_id, 
-                                worker_id, 
-                                f"Appointment booked!\nIndicator: {indicator}"
+                            send_alert(
+                                f"🚨 <b>ERROR PAGE DETECTED!</b>\n"
+                                f"Session: {self.session_id}\n"
+                                f"Error Type: {error_pattern}\n"
+                                f"Ref-ID: {ref_id_match.group(1) if ref_id_match else 'N/A'}\n"
+                                f"Worker: W{worker_id}"
                             )
                         except:
                             pass
                         
-                        with self.lock:
-                            self.global_stats.success = True
-                        
-                        self.stop_event.set()
-                        return True
+                        return False  # فشل حقيقي
                 
-                # 4. Check for soft fail (back to form)
+                # ===============================================
+                # 🎯 الاكتشاف الدقيق لصفحة النجاح (متعددة اللغات)
+                # ===============================================
+                
+                # 🔍 مؤشرات النجاح بالألمانية
+                german_success_patterns = [
+                    ("Sie haben erfolgreich einen Termin", "GERMAN_MAIN_SUCCESS"),
+                    ("Die Buchungsnummer lautet", "GERMAN_BOOKING_NUMBER"),
+                    ("Sie erhalten in Kürze eine E-Mail", "GERMAN_EMAIL_CONFIRMATION"),
+                    ("erfolgreich einen Termin", "GERMAN_SUCCESSFUL"),
+                    ("gebucht", "GERMAN_BOOKED"),
+                    ("Buchungsnummer", "GERMAN_BOOKING_NUM"),
+                    ("Bestätigung", "GERMAN_CONFIRMATION"),
+                ]
+                
+                # 🔍 مؤشرات النجاح بالإنجليزية
+                english_success_patterns = [
+                    ("You have successfully booked an appointment", "ENGLISH_MAIN_SUCCESS"),
+                    ("The appointment number is", "ENGLISH_APPOINTMENT_NUMBER"),
+                    ("You will shortly receive an email confirming your appointment", "ENGLISH_EMAIL_CONFIRMATION"),
+                    ("successfully booked", "ENGLISH_SUCCESSFUL_BOOKED"),
+                    ("appointment number", "ENGLISH_APPOINTMENT_NUM"),
+                    ("confirming your appointment", "ENGLISH_CONFIRMING"),
+                    ("email confirming", "ENGLISH_EMAIL_CONFIRM"),
+                ]
+                
+                # 🔢 استخراج رقم الموعد/الحجز
+                booking_number = None
+                
+                # البحث بالألمانية
+                de_booking_match = re.search(
+                    r'Die Buchungsnummer lautet\s+(\d+)', 
+                    content
+                )
+                if de_booking_match:
+                    booking_number = de_booking_match.group(1)
+                    logger.critical(f"[W{worker_id}] ✅ GERMAN BOOKING NUMBER: {booking_number}")
+                
+                # البحث بالإنجليزية
+                en_booking_match = re.search(
+                    r'The appointment number is\s+(\d+)', 
+                    content
+                )
+                if en_booking_match:
+                    booking_number = en_booking_match.group(1)
+                    logger.critical(f"[W{worker_id}] ✅ ENGLISH APPOINTMENT NUMBER: {booking_number}")
+                
+                # البحث العام
+                if not booking_number:
+                    general_match = re.search(
+                        r'(?:appointment|booking)\s*(?:number|nummer)[:\s]+(\d+)', 
+                        content, 
+                        re.IGNORECASE
+                    )
+                    booking_number = general_match.group(1) if general_match else None
+                
+                # 📊 تقييم مؤشرات النجاح
+                success_score = 0
+                success_details = []
+                detected_language = "UNKNOWN"
+                
+                # التحقق من اللغة الألمانية
+                german_score = 0
+                for pattern, description in german_success_patterns:
+                    if pattern in content:
+                        german_score += 1
+                        success_score += 1
+                        success_details.append(description)
+                        logger.info(f"[W{worker_id}] ✓ German: '{description}'")
+                
+                # التحقق من اللغة الإنجليزية
+                english_score = 0
+                for pattern, description in english_success_patterns:
+                    if pattern in content:
+                        english_score += 1
+                        success_score += 1
+                        success_details.append(description)
+                        logger.info(f"[W{worker_id}] ✓ English: '{description}'")
+                
+                # تحديد اللغة
+                if german_score > english_score:
+                    detected_language = "GERMAN"
+                elif english_score > german_score:
+                    detected_language = "ENGLISH"
+                else:
+                    detected_language = "MIXED"
+                
+                logger.info(f"[W{worker_id}] 📚 Detected Language: {detected_language}")
+                
+                # 📧 استخراج البريد الإلكتروني
+                email_matches = re.findall(
+                    r'email\s*(?:address|anschrift)[:\s]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', 
+                    content, 
+                    re.IGNORECASE
+                )
+                
+                if not email_matches:
+                    # بحث عام عن البريد
+                    email_matches = re.findall(
+                        r'[\w.]+@[\w.]+\.[a-zA-Z]{2,}', 
+                        content
+                    )
+                
+                if email_matches:
+                    confirmation_email = email_matches[0]
+                    logger.info(f"[W{worker_id}] 📧 Confirmation email: {confirmation_email}")
+                    success_score += 2
+                else:
+                    confirmation_email = None
+                
+                # 📅 استخراج التاريخ والوقت
+                datetime_match = re.search(
+                    r'(?:on|am)\s+(\d{2}\.\d{2}\.\d{4})\s+(?:at|um)\s+(\d{2}:\d{2})', 
+                    content, 
+                    re.IGNORECASE
+                )
+                
+                if datetime_match:
+                    date = datetime_match.group(1)
+                    time_str = datetime_match.group(2)
+                    logger.info(f"[W{worker_id}] 📅 Appointment: {date} at {time_str}")
+                    success_score += 1
+                else:
+                    date = time_str = None
+                
+                # ===============================================
+                # ✅ شروط النجاح النهائية الصارمة
+                # ===============================================
+                
+                # الشرط الأساسي: يجب أن يحتوي على جملة النجاح الرئيسية
+                has_main_success = any([
+                    "You have successfully booked an appointment" in content,
+                    "Sie haben erfolgreich einen Termin" in content
+                ])
+                
+                # الشرط الأساسي: يجب أن يحتوي على رقم الحجز/الموعد
+                has_booking_number = booking_number is not None
+                
+                # الشرط الأساسي: يجب أن يحتوي على تأكيد البريد الإلكتروني
+                has_email_confirmation = any([
+                    "You will shortly receive an email" in content,
+                    "Sie erhalten in Kürze eine E-Mail" in content
+                ])
+                
+                # الشرط الأساسي: لا يجب أن يحتوي على كلمات خطأ
+                has_no_errors = not any(error in content_lower for error in ["error", "fehler", "ref-id:"])
+                
+                # الشرط الإضافي: يجب أن تكون النقاط كافية
+                has_sufficient_score = success_score >= 6
+                
+                # ===============================================
+                # 🏆 التحقق النهائي والحكم
+                # ===============================================
+                
+                success_conditions = {
+                    "has_main_success": has_main_success,
+                    "has_booking_number": has_booking_number,
+                    "has_email_confirmation": has_email_confirmation,
+                    "has_no_errors": has_no_errors,
+                    "has_sufficient_score": has_sufficient_score,
+                }
+                
+                logger.info(f"[W{worker_id}] Success Conditions: {success_conditions}")
+                logger.info(f"[W{worker_id}] Success Score: {success_score}/12")
+                logger.info(f"[W{worker_id}] Success Details: {success_details}")
+                logger.info(f"[W{worker_id}] Language: {detected_language}")
+                
+                # الحكم النهائي
+                if (has_main_success and has_booking_number and has_email_confirmation and 
+                    has_no_errors and has_sufficient_score):
+                    
+                    logger.critical(f"[W{worker_id}] 🎉🎉🎉 REAL SUCCESS CONFIRMED IN {detected_language}! 🎉🎉🎉")
+                    logger.critical(f"[W{worker_id}] 📋 {'Booking' if detected_language == 'GERMAN' else 'Appointment'} Number: {booking_number}")
+                    logger.critical(f"[W{worker_id}] 📧 Confirmation email: {confirmation_email if confirmation_email else 'Will be sent'}")
+                    if date and time_str:
+                        logger.critical(f"[W{worker_id}] 📅 Appointment: {date} at {time_str}")
+                    
+                    # حفظ أدلة النجاح
+                    self.debug_manager.save_critical_screenshot(page, f"SUCCESS_{detected_language}", worker_id)
+                    self.debug_manager.save_debug_html(page, f"SUCCESS_{detected_language}", worker_id)
+                    
+                    # إرسال تنبيه النجاح مع التفاصيل
+                    try:
+                        success_message = (
+                            f"✅ APPOINTMENT BOOKED SUCCESSFULLY!\n"
+                            f"🌐 Language: {detected_language}\n"
+                            f"📋 {'Booking' if detected_language == 'GERMAN' else 'Appointment'} Number: {booking_number}\n"
+                        )
+                        
+                        if date and time_str:
+                            success_message += f"📅 Date: {date}\n⏰ Time: {time_str}\n"
+                        
+                        if confirmation_email:
+                            success_message += f"📧 Confirmation sent to: {confirmation_email}\n"
+                        else:
+                            success_message += f"📧 Confirmation email will be sent\n"
+                        
+                        success_message += f"🎯 Success Score: {success_score}/12"
+                        
+                        send_success_notification(self.session_id, worker_id, success_message)
+                    except Exception as e:
+                        logger.error(f"[W{worker_id}] Notification error: {e}")
+                    
+                    with self.lock:
+                        self.global_stats.success = True
+                    
+                    self.stop_event.set()
+                    return True
+                
+                # ===============================================
+                # 🔄 اكتشاف العودة للفورم
+                # ===============================================
                 if page.locator("input[name='lastname']").is_visible(timeout=1000):
                     logger.warning(f"[W{worker_id}] Bounced back to form (Attempt {attempt})")
                     
-                    # Refresh captcha
+                    # تحديث الكابتشا
                     self.solver.reload_captcha(page)
                     
-                    # Re-fill form if cleared
+                    # إعادة تعبئة الفورم
                     if page.locator("input[name='lastname']").input_value() == "":
                         logger.info(f"[W{worker_id}] Re-filling form...")
                         self.fill_booking_form(page, session)
@@ -726,23 +942,27 @@ class EliteSniperV2:
                     time.sleep(1)
                     continue
                 
-                # 5. Hard fail detection
-                if "beginnen sie den buchungsvorgang neu" in content or "ref-id:" in content:
-                    logger.error(f"[W{worker_id}] ❌ HARD FAIL: Session expired")
-                    session.health = SessionHealth.CRITICAL
-                    return False
-                
-                # 6. Redirected to calendar
+                # اكتشاف إعادة التوجيه للتقويم
                 if "appointment_showMonth" in page.url or "appointment_showDay" in page.url:
                     logger.warning(f"[W{worker_id}] [REDIRECT] Slot taken")
                     return False
                 
-                # 7. Check for captcha error messages
-                if "incorrect" in content or "wrong" in content or "falsch" in content:
+                # اكتشاف أخطاء الكابتشا
+                captcha_error = any(word in content_lower for word in ["incorrect", "wrong", "falsch", "ungültig"])
+                if captcha_error:
                     logger.warning(f"[W{worker_id}] Captcha was wrong, refreshing...")
                     self.solver.reload_captcha(page)
                     time.sleep(1)
                     continue
+                
+                # إذا وصلنا هنا ولم نحدد النجاح، فهي صفحة غير معروفة
+                logger.warning(f"[W{worker_id}] Unknown page type - Saving for analysis")
+                self.debug_manager.save_debug_html(page, f"unknown_page_attempt_{attempt}", worker_id)
+                self.debug_manager.save_critical_screenshot(page, f"unknown_page_attempt_{attempt}", worker_id)
+                
+                # تحليل إضافي للمحتوى
+                content_preview = content[:500].replace('\n', ' ').replace('\r', ' ')
+                logger.info(f"[W{worker_id}] Page content preview: {content_preview}")
                 
             except Exception as e:
                 logger.error(f"[W{worker_id}] Submit attempt {attempt} error: {e}")
@@ -752,64 +972,6 @@ class EliteSniperV2:
         
         logger.warning(f"[W{worker_id}] Max submit attempts ({max_attempts}) reached")
         return False
-    
-    def _check_submission_success(self, page: Page, worker_id: int) -> bool:
-        """Check if submission was successful"""
-        try:
-            content = page.content().lower()
-            
-            # Success indicators
-            success_terms = [
-                "appointment number",
-                "confirmation",
-                "successfully",
-                "termin wurde gebucht",
-                "ihre buchung",
-                "booking confirmed",
-                "appointment confirmed",
-            ]
-            
-            for term in success_terms:
-                if term in content:
-                    logger.critical(f"[W{worker_id}] *** SUCCESS! Found: '{term}' ***")
-                    
-                    # Save evidence
-                    self.debug_manager.save_critical_screenshot(page, "SUCCESS_FINAL", worker_id)
-                    self.debug_manager.save_debug_html(page, "SUCCESS_FINAL", worker_id)
-                    
-                    # Notify
-                    try:
-                        send_success_notification(self.session_id, worker_id, None)
-                    except:
-                        pass
-                    
-                    with self.lock:
-                        self.global_stats.success = True
-                    
-                    self.stop_event.set()
-                    return True
-                    
-            # If we get here, no success terms found
-            logger.warning(f"[W{worker_id}] Submission verification failed - checking for specific errors...")
-            
-            # Save snapshot of what we see
-            try:
-                self.debug_manager.save_debug_html(page, "submission_failed_snapshot", worker_id)
-                self.debug_manager.save_critical_screenshot(page, "submission_failed_snapshot", worker_id)
-            except:
-                pass
-                
-            return False
-        except Exception as e:
-            logger.error(f"[W{worker_id}] Error in success check: {e}")
-            return False
-    
-    def _is_on_form_page(self, page: Page) -> bool:
-        """Check if still on form page (silent reject)"""
-        try:
-            return page.locator("input[name='lastname']").count() > 0
-        except:
-            return False
     
     # ==================== Scout Behavior ====================
     
@@ -1092,119 +1254,6 @@ class EliteSniperV2:
             worker_logger.error(f"Attacker behavior error: {e}")
             session.increment_failure(str(e))
     
-    # ==================== Worker Thread ====================
-    
-    def session_worker(self, browser: Browser, worker_id: int):
-        """
-        Worker thread for one browser session
-        Implements Scout or Attacker behavior based on worker_id
-        """
-        worker_logger = logging.getLogger(f"EliteSniperV2.W{worker_id}")
-        
-        try:
-            # Get proxy for this worker
-            proxy = self.proxies[worker_id - 1] if len(self.proxies) >= worker_id else None
-            
-            # Create initial context
-            context, page, session = self.create_context(browser, worker_id, proxy)
-            
-            role = "SCOUT" if worker_id == 1 else "ATTACKER"
-            worker_logger.info(f"👤 Worker started - Role: {role}")
-            
-            cycle = 0
-            last_status_update = 0
-            
-            while not self.stop_event.is_set():
-                cycle += 1
-                
-                try:
-                    current_time = time.time()
-                    mode = self.get_mode()
-                    
-                    # Periodic status update (every 5 minutes)
-                    if current_time - last_status_update > 300:
-                        send_status_update(
-                            self.session_id,
-                            f"Cycle {cycle}",
-                            self.global_stats.to_dict(),
-                            mode
-                        )
-                        last_status_update = current_time
-                    
-                    # Pre-attack reset - fresh session before attack window
-                    if self.is_pre_attack() and not session.pre_attack_reset_done:
-                        worker_logger.warning("⚙️ PRE-ATTACK: Fresh session reset")
-                        try:
-                            context.close()
-                        except:
-                            pass
-                        context, page, session = self.create_context(browser, worker_id, proxy)
-                        session.pre_attack_reset_done = True
-                        
-                        # Pre-solve captcha while waiting
-                        try:
-                            page.goto(self.base_url, timeout=15000, wait_until="domcontentloaded")
-                            self.solver.pre_solve(page, "PRE_ATTACK")
-                        except:
-                            pass
-                        
-                        continue
-                    
-                    # Check session health
-                    if session.should_terminate() or session.is_expired():
-                        worker_logger.warning("💀 Session unhealthy - Rebirth!")
-                        try:
-                            context.close()
-                        except:
-                            pass
-                        context, page, session = self.create_context(browser, worker_id, proxy)
-                        continue
-                    
-                    # Route to appropriate behavior based on role
-                    if session.role == SessionRole.SCOUT:
-                        self._scout_behavior(page, session, worker_logger)
-                    else:
-                        self._attacker_behavior(page, session, worker_logger)
-                    
-                    # Reset slot event after processing (attackers will re-wait)
-                    if session.role == SessionRole.ATTACKER and self.slot_event.is_set():
-                        # Small delay before clearing to let other attackers see it
-                        time.sleep(0.5)
-                        self.slot_event.clear()
-                    
-                    # Dynamic sleep
-                    sleep_time = self.get_sleep_interval()
-                    time.sleep(sleep_time)
-                    
-                except Exception as e:
-                    worker_logger.error(f"❌ Cycle error: {e}")
-                    session.increment_failure(str(e))
-                    
-                    with self.lock:
-                        self.global_stats.errors += 1
-                    
-                    # Soft recovery on minor errors
-                    if session.consecutive_errors < 3:
-                        self.soft_recovery(session, f"Cycle error: {e}")
-                    else:
-                        # Hard reset
-                        worker_logger.warning("♻️ Hard reset required")
-                        try:
-                            context.close()
-                        except:
-                            pass
-                        context, page, session = self.create_context(browser, worker_id, proxy)
-        
-        except Exception as e:
-            worker_logger.error(f"[FATAL] Worker error: {e}", exc_info=True)
-        
-        finally:
-            try:
-                context.close()
-            except:
-                pass
-            worker_logger.info("[END] Worker terminated")
-    
     # ==================== Single Session Mode ====================
     
     def _run_single_session(self, browser: Browser, worker_id: int):
@@ -1263,8 +1312,6 @@ class EliteSniperV2:
                     worker_logger.info(f"[DEBUG] Processing URL {i+1}/{len(month_urls)}")
                     if self.stop_event.is_set():
                         worker_logger.info("[DEBUG] Stop event set - breaking loop")
-                        break
-                    if self.stop_event.is_set():
                         break
                     
                     # ═══════════════════════════════════════════════════════════════
@@ -1610,7 +1657,7 @@ class EliteSniperV2:
             True if booking successful, False otherwise
         """
         logger.info("=" * 70)
-        logger.info(f"[ELITE SNIPER V{self.VERSION}] - STARTING EXECUTION")
+        logger.info(f"[ELITE SNIPER {self.VERSION}] - STARTING EXECUTION")
         # Single session mode - multi-session architecture preserved for future
         logger.info("[MODE] Single Session (Multi-session ready for expansion)")
         logger.info(f"[ATTACK TIME] {Config.ATTACK_HOUR}:00 AM {Config.TIMEZONE}")
@@ -1620,7 +1667,7 @@ class EliteSniperV2:
         try:
             # Send startup notification
             send_alert(
-                f"[Elite Sniper v{self.VERSION} Started]\n"
+                f"[Elite Sniper {self.VERSION} Started]\n"
                 f"Session: {self.session_id}\n"
                 f"Mode: Single Session\n"
                 f"Attack: {Config.ATTACK_HOUR}:00 AM Aden\n"
@@ -1688,7 +1735,7 @@ class EliteSniperV2:
         runtime = (datetime.datetime.now() - self.start_time).total_seconds()
         
         send_alert(
-            f"ELITE SNIPER V2.0 - SUCCESS!\n"
+            f"ELITE SNIPER {self.VERSION} - SUCCESS!\n"
             f"[+] Appointment booked!\n"
             f"Session: {self.session_id}\n"
             f"Runtime: {runtime:.0f}s\n"
