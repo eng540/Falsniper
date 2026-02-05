@@ -1,5 +1,6 @@
 """
-Elite Sniper v2.2 - Anti-Detection & Timeout Fix
+Elite Sniper v2.0 - النسخة المصححة السلوكية
+تطبيق حرفي للقواعد التنفيذية من التقرير التشخيصي
 """
 
 import time
@@ -8,826 +9,785 @@ import datetime
 import logging
 import os
 import sys
-import re
-from typing import List, Tuple, Optional, Dict, Any
-from threading import Thread, Event, Lock
-from dataclasses import asdict
+from typing import List, Tuple, Optional
+from threading import Event, Lock
 
 import pytz
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser, expect
+from playwright.sync_api import sync_playwright, Page, Browser
 
 # Internal imports
 from .config import Config
 from .ntp_sync import NTPTimeSync
-from .session_state import (
-    SessionState, SessionStats, SystemState, SessionHealth, 
-    SessionRole, Incident, IncidentManager, IncidentType, IncidentSeverity
-)
+from .session_state import SessionState, SessionStats
 from .captcha import EnhancedCaptchaSolver
-from .notifier import send_alert, send_photo, send_success_notification, send_status_update
+from .notifier import send_alert, send_success_notification
 from .debug_utils import DebugManager
 
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s.%(msecs)03d [%(levelname)s] [%(name)s] %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('elite_sniper_v2_fixed.log')
+        logging.FileHandler('elite_sniper_v2_corrected.log')
     ]
 )
-logger = logging.getLogger("EliteSniperV2_Fixed")
+logger = logging.getLogger("EliteSniperV2.Corrected")
 
 
-class EliteSniperV2:
-    VERSION = "2.2.0-ANTIBAN"
+class EliteSniperV2Corrected:
+    """
+    النسخة المصححة: جلسة واحدة، سلوك بشري، تدفق طبيعي
+    """
     
-    # [NEW] Enhanced browser args to bypass detection
-    STEALTH_ARGS = [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--disable-site-isolation-trials",
-        "--disable-web-security",
-        "--disable-features=BlockInsecurePrivateNetworkRequests",
-        "--disable-features=InterestCohort",
-        "--disable-features=PrivacySandboxAdsAPIs",
-        "--disable-features=PrivacySandboxSettings",
-        "--disable-features=ThirdPartyStoragePartitioning",
-        "--disable-features=UserAgentClientHint",
-        "--disable-features=WebRtcHideLocalIpsWithMdns",
-        "--disable-features=AllowPopupsDuringPageUnload",
-        "--disable-features=BackForwardCache",
-        "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync",
-        "--disable-features=IntensiveWakeUpThrottling",
-        "--disable-features=ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes",
-        "--disable-background-networking",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-breakpad",
-        "--disable-component-extensions-with-background-pages",
-        "--disable-default-apps",
-        "--disable-dev-shm-usage",
-        "--disable-extensions",
-        "--disable-features=TranslateUI",
-        "--disable-hang-monitor",
-        "--disable-ipc-flooding-protection",
-        "--disable-popup-blocking",
-        "--disable-prompt-on-repost",
-        "--disable-renderer-backgrounding",
-        "--disable-sync",
-        "--force-color-profile=srgb",
-        "--metrics-recording-only",
-        "--no-first-run",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        "--enable-features=NetworkService,NetworkServiceInProcess",
-        "--lang=en-US",
-    ]
+    VERSION = "2.0.1.CORRECTED"
     
     def __init__(self, run_mode: str = "AUTO"):
+        """تهيئة النسخة المصححة"""
         self.run_mode = run_mode
         
         logger.info("=" * 70)
-        logger.info(f"[INIT] ELITE SNIPER V{self.VERSION} - INITIALIZING")
-        logger.info(f"[MODE] Running Mode: {self.run_mode}")
+        logger.info(f"[INIT] ELITE SNIPER {self.VERSION} - النسخة المصححة")
+        logger.info(f"[MODE] {self.run_mode}")
         logger.info("=" * 70)
         
+        # التحقق من الإعدادات
         self._validate_config()
         
-        self.session_id = f"elite_v2_{int(time.time())}_{random.randint(1000, 9999)}"
+        # إدارة الجلسة
+        self.session_id = f"corrected_{int(time.time())}_{random.randint(1000, 9999)}"
         self.start_time = datetime.datetime.now()
         
-        self.system_state = SystemState.STANDBY
+        # حالة النظام
         self.stop_event = Event()
-        self.slot_event = Event()
-        self.target_url: Optional[str] = None
         self.lock = Lock()
         
-        is_manual = (self.run_mode == "MANUAL")
-        is_auto_full = (self.run_mode == "AUTO_FULL")
-        self.solver = EnhancedCaptchaSolver(manual_only=is_manual)
-        if is_auto_full:
-            logger.info("[MODE] AUTO FULL ENABLED")
-            self.solver.auto_full = True
-            
+        # المكونات
+        self.solver = EnhancedCaptchaSolver(manual_only=(self.run_mode == "MANUAL"))
         self.debug_manager = DebugManager(self.session_id, Config.EVIDENCE_DIR)
-        self.incident_manager = IncidentManager()
         self.ntp_sync = NTPTimeSync(Config.NTP_SERVERS, Config.NTP_SYNC_INTERVAL)
         
+        # التكوين
         self.base_url = self._prepare_base_url(Config.TARGET_URL)
         self.timezone = pytz.timezone(Config.TIMEZONE)
         
-        # [NEW] More realistic user agents with proper chrome versions
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        ]
+        # إحصائيات
+        self.stats = SessionStats()
         
-        self.proxies = self._load_proxies()
-        self.global_stats = SessionStats()
+        # بدء مزامنة الوقت
         self.ntp_sync.start_background_sync()
         
-        logger.info(f"[ID] Session ID: {self.session_id}")
-        logger.info(f"[OK] Initialization complete")
-
+        logger.info(f"[ID] {self.session_id}")
+        logger.info(f"[URL] {self.base_url[:60]}...")
+        logger.info(f"[TZ] {self.timezone}")
+        logger.info(f"[NTP] Offset: {self.ntp_sync.offset:.4f}s")
+        logger.info("[OK] التهيئة مكتملة")
+    
     def _validate_config(self):
-        required = ['TARGET_URL', 'LAST_NAME', 'FIRST_NAME', 'EMAIL', 'PASSPORT', 'PHONE']
+        """التحقق من الإعدادات المطلوبة"""
+        required = [
+            'TARGET_URL', 'LAST_NAME', 'FIRST_NAME', 
+            'EMAIL', 'PASSPORT', 'PHONE'
+        ]
+        
         missing = [field for field in required if not getattr(Config, field, None)]
+        
         if missing:
-            raise ValueError(f"[ERR] Missing configuration: {', '.join(missing)}")
-        logger.info("[OK] Configuration validated")
-
+            raise ValueError(f"[ERR] Missing config: {', '.join(missing)}")
+        
+        logger.info("[OK] الإعدادات صالحة")
+    
     def _prepare_base_url(self, url: str) -> str:
+        """تحضير الرابط الأساسي"""
         if "request_locale" not in url:
             separator = "&" if "?" in url else "?"
             return f"{url}{separator}request_locale=en"
         return url
-
-    def _load_proxies(self) -> List[Optional[str]]:
-        proxies = []
-        if hasattr(Config, 'PROXIES') and Config.PROXIES:
-            proxies.extend([p for p in Config.PROXIES if p])
-        try:
-            if os.path.exists("proxies.txt"):
-                with open("proxies.txt") as f:
-                    file_proxies = [line.strip() for line in f if line.strip()]
-                    proxies.extend(file_proxies)
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to load proxies.txt: {e}")
-        while len(proxies) < 3:
-            proxies.append(None)
-        return proxies[:3]
-
+    
     def get_current_time_aden(self) -> datetime.datetime:
+        """الحصول على الوقت الحالي في عدن"""
         corrected_utc = self.ntp_sync.get_corrected_time()
         aden_time = corrected_utc.replace(tzinfo=pytz.UTC).astimezone(self.timezone)
         return aden_time
-
-    def is_pre_attack(self) -> bool:
-        now = self.get_current_time_aden()
-        return (now.hour == 1 and now.minute == Config.PRE_ATTACK_MINUTE and 
-                now.second >= Config.PRE_ATTACK_SECOND)
-
+    
     def is_attack_time(self) -> bool:
+        """التحقق من وقت الهجوم"""
         now = self.get_current_time_aden()
         return now.hour == Config.ATTACK_HOUR and now.minute < Config.ATTACK_WINDOW_MINUTES
-
-    def get_sleep_interval(self) -> float:
-        if self.is_attack_time():
-            return random.uniform(Config.ATTACK_SLEEP_MIN, Config.ATTACK_SLEEP_MAX)
-        elif self.is_pre_attack():
-            return Config.PRE_ATTACK_SLEEP
-        else:
-            now = self.get_current_time_aden()
-            if now.hour == 1 and now.minute >= 45:
-                return Config.WARMUP_SLEEP
-            return random.uniform(Config.PATROL_SLEEP_MIN, Config.PATROL_SLEEP_MAX)
-
-    def get_mode(self) -> str:
-        if self.is_attack_time():
-            return "ATTACK"
-        elif self.is_pre_attack():
-            return "PRE_ATTACK"
-        else:
-            now = self.get_current_time_aden()
-            if now.hour == 1 and now.minute >= 45:
-                return "WARMUP"
-            return "PATROL"
-
-    def create_context(self, browser: Browser, worker_id: int, proxy: Optional[str] = None):
+    
+    def create_natural_context(self, browser: Browser) -> Tuple[Page, SessionState]:
+        """
+        إنشاء سياق طبيعي بسلوك بشري
+        
+        القاعدة 1: جلسة واحدة = قصة واحدة
+        """
         try:
-            role = SessionRole.SCOUT if worker_id == 1 else SessionRole.ATTACKER
-            user_agent = random.choice(self.user_agents)
-            viewport_width = 1920 + random.randint(-100, 100)
-            viewport_height = 1080 + random.randint(-50, 50)
+            # إنشاء context مع سلوك بشري
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1366, "height": 768},
+                locale="en-US",
+                timezone_id="Asia/Aden",
+                ignore_https_errors=True
+            )
             
-            context_args = {
-                "user_agent": user_agent,
-                "viewport": {"width": viewport_width, "height": viewport_height},
-                "locale": "en-US",
-                "timezone_id": "Asia/Aden",
-                "ignore_https_errors": True,
-                # [NEW] Additional context options for stealth
-                "java_script_enabled": True,
-                "bypass_csp": True,
-                "permissions": ["notifications"],
-            }
-            
-            if proxy:
-                context_args["proxy"] = {"server": proxy}
-                logger.info(f"[PROXY] [W{worker_id}] Using proxy: {proxy[:30]}...")
-            
-            context = browser.new_context(**context_args)
+            # إضافة سكريبت لإخفاء الأدلة الأوتوماتيكية
             page = context.new_page()
-            
-            # [NEW] Comprehensive stealth script
             page.add_init_script("""
-                // Override navigator properties
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+                Object.defineProperty(navigator, 'webdriver', { 
+                    get: () => undefined 
+                });
                 
-                // Override chrome
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
-                
-                // Override permissions
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
-                
-                // WebGL fingerprint randomization
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) return 'Intel Inc.';
-                    if (parameter === 37446) return 'Intel Iris Xe Graphics';
-                    return getParameter(parameter);
-                };
-                
-                // Canvas fingerprint protection
-                const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-                const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-                
-                // Keep-alive heartbeat
+                // Heartbeat بسيط
                 setInterval(() => {
-                    fetch(location.href, { method: 'HEAD', cache: 'no-store' })
-                        .catch(() => {});
+                    fetch(location.href, { method: 'HEAD' }).catch(()=>{});
                 }, 30000);
             """)
             
-            # [MODIFIED] Longer timeouts for slow connections
-            context.set_default_timeout(60000)  # Increased from 25s
-            context.set_default_navigation_timeout(90000)  # Increased from 30s
+            # ضبط المهلات
+            context.set_default_timeout(30000)
+            context.set_default_navigation_timeout(40000)
             
-            # [MODIFIED] Less aggressive resource blocking
-            def route_handler(route):
-                resource_type = route.request.resource_type
-                # Only block heavy resources, allow scripts and xhr
-                if resource_type in ["image", "media", "font"]:
-                    route.abort()
-                else:
-                    route.continue_()
-            
-            page.route("**/*", route_handler)
-            
-            # [NEW] Set extra headers to appear more legitimate
-            page.set_extra_http_headers({
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0",
-            })
-            
-            session_state = SessionState(
-                session_id=f"{self.session_id}_w{worker_id}",
-                role=role,
-                worker_id=worker_id,
+            # إنشاء حالة الجلسة
+            session = SessionState(
+                session_id=self.session_id,
+                role=None,
+                worker_id=1,
                 max_age=Config.SESSION_MAX_AGE,
                 max_idle=Config.SESSION_MAX_IDLE,
-                max_failures=Config.MAX_CONSECUTIVE_ERRORS,
-                max_captcha_attempts=Config.MAX_CAPTCHA_ATTEMPTS
+                max_failures=10,  # متساهل
+                max_captcha_attempts=10
             )
             
-            logger.info(f"[CTX] [W{worker_id}] Context created - Role: {role.value}")
+            logger.info("[CTX] الجلسة المنشأة - سلوك بشري")
             
             with self.lock:
-                self.global_stats.rebirths += 1
+                self.stats.rebirths += 1
             
-            return context, page, session_state
+            return page, session
             
         except Exception as e:
-            logger.error(f"[ERR] [W{worker_id}] Context creation failed: {e}")
+            logger.error(f"[ERR] فشل إنشاء السياق: {e}")
             raise
-
-    def validate_session_health(self, page: Page, session: SessionState, location: str = "UNKNOWN") -> bool:
-        worker_id = session.worker_id
+    
+    def human_type(self, page: Page, selector: str, text: str) -> bool:
+        """
+        الكتابة البشرية حرفًا حرفًا
         
-        if session.is_expired():
-            logger.critical(f"[EXP] [W{worker_id}][{location}] Session EXPIRED")
-            return False
-        
-        if session.should_terminate():
-            logger.critical(f"💀 [W{worker_id}][{location}] Session POISONED")
-            return False
-        
-        if session.captcha_solved:
-            has_captcha, _ = self.solver.safe_captcha_check(page, location)
-            if has_captcha:
-                logger.critical(f"💀 [W{worker_id}][{location}] DOUBLE CAPTCHA")
-                session.health = SessionHealth.POISONED
-                return False
-        
-        session.touch()
-        return True
-
-    def soft_recovery(self, session: SessionState, reason: str):
-        logger.info(f"🔄 [W{session.worker_id}] Soft recovery: {reason}")
-        session.consecutive_errors = 0
-        session.failures = max(0, session.failures - 1)
-        
-        if session.health == SessionHealth.DEGRADED:
-            session.health = SessionHealth.WARNING
-        elif session.health == SessionHealth.WARNING:
-            session.health = SessionHealth.CLEAN
-        
-        session.touch()
-        logger.info(f"✅ [W{session.worker_id}] Soft recovery completed")
-
-    def generate_month_urls(self) -> List[str]:
-        try:
-            today = datetime.datetime.now().date()
-            base_clean = self.base_url.split("&dateStr=")[0] if "&dateStr=" in self.base_url else self.base_url
-            
-            urls = []
-            priority_offsets = [2, 3, 1, 4, 5, 6]
-            
-            for offset in priority_offsets:
-                future_date = today + datetime.timedelta(days=30 * offset)
-                date_str = f"15.{future_date.month:02d}.{future_date.year}"
-                url = f"{base_clean}&dateStr={date_str}"
-                urls.append(url)
-            
-            return urls
-        except Exception as e:
-            logger.error(f"❌ Month URL generation failed: {e}")
-            return []
-
-    def _human_type(self, page: Page, selector: str, value: str, worker_logger) -> bool:
+        القاعدة 4: الإدخال يجب أن يكون حدثيًا
+        """
         try:
             locator = page.locator(selector).first
             if not locator.is_visible():
+                logger.debug(f"[TYPE] العنصر غير مرئي: {selector}")
                 return False
             
+            # 1. التركيز
             locator.click()
+            time.sleep(0.1)
+            
+            # 2. مسح المحتوى القديم
             locator.fill("")
             time.sleep(0.1)
             
-            for char in value:
-                locator.type(char, delay=random.randint(5, 15))
+            # 3. الكتابة حرفًا حرفًا
+            for char in text:
+                locator.type(char, delay=random.uniform(20, 50))
+                time.sleep(random.uniform(0.01, 0.03))
             
+            # 4. الخروج من الحقل
             page.evaluate(f"""
-                const el = document.querySelector("{selector}");
-                if(el) {{
-                    el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                }}
+                document.querySelector("{selector}")?.blur();
             """)
             
+            time.sleep(0.2)
             return True
-        except Exception as e:
-            worker_logger.debug(f"Human type error ({selector}): {e}")
-            return False
-
-    def _fill_booking_form(self, page: Page, session: SessionState, worker_logger) -> bool:
-        try:
-            worker_logger.info("📝 Filling form...")
             
+        except Exception as e:
+            logger.warning(f"[TYPE] خطأ في الكتابة: {e}")
+            return False
+    
+    def human_click(self, page: Page, selector: str) -> bool:
+        """
+        نقر بشري
+        
+        القاعدة 5: Click في صفحات التقويم
+        """
+        try:
+            locator = page.locator(selector).first
+            if not locator.is_visible(timeout=2000):
+                return False
+            
+            # نقر بشري مع حركة عشوائية
+            locator.click(delay=random.uniform(50, 150))
+            return True
+            
+        except Exception as e:
+            logger.debug(f"[CLICK] خطأ في النقر: {e}")
+            return False
+    
+    def navigate_with_patience(self, page: Page, url: str, location: str) -> bool:
+        """
+        الانتقال بصبر
+        
+        القاعدة 6: لا تحقق أثناء الانتقال
+        """
+        try:
+            logger.info(f"[NAV] {location} → {url[:80]}...")
+            
+            # الانتقال مع انتظار الاستقرار
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            
+            # انتظار إضافي للاستقرار
+            time.sleep(2)
+            
+            with self.lock:
+                self.stats.pages_loaded += 1
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"[NAV] خطأ في الانتقال إلى {location}: {e}")
+            return False
+    
+    def handle_month_captcha(self, page: Page, session: SessionState) -> bool:
+        """
+        معالجة كابتشا الشهر بهدوء
+        
+        القاعدة 3: الكابتشا لا تغيّر الحالة
+        """
+        try:
+            # التحقق بهدوء
+            has_captcha, _ = self.solver.safe_captcha_check(page, "MONTH")
+            
+            if not has_captcha:
+                return True  # لا توجد كابتشا، استمر
+            
+            logger.info("[CAPTCHA] كابتشا شهر - حل بهدوء...")
+            
+            # الحل بهدوء
+            success, code, status = self.solver.solve_from_page(
+                page, "MONTH", 
+                session_age=session.age(),
+                attempt=1,
+                max_attempts=3
+            )
+            
+            if not success or not code:
+                logger.warning(f"[CAPTCHA] فشل حل كابتشا الشهر: {status}")
+                return False
+            
+            # الإدخال البشري للكابتشا
+            captcha_input = page.locator("input[name='captchaText']").first
+            if captcha_input.is_visible():
+                captcha_input.click()
+                captcha_input.fill("")
+                self.human_type(page, "input[name='captchaText']", code)
+                
+                # النقر على زر الإرسال (ليس Enter!)
+                submit_btn = page.locator("input[type='submit']").first
+                if submit_btn.is_visible():
+                    self.human_click(page, "input[type='submit']")
+                else:
+                    # Fallback: Enter فقط إذا لم يكن هناك زر
+                    page.keyboard.press("Enter")
+                
+                # انتظار الاستجابة بهدوء
+                time.sleep(3)
+                
+                # التحقق بهدوء
+                solved, _ = self.solver.verify_captcha_solved(page, "MONTH_VERIFY")
+                if solved:
+                    logger.info(f"[CAPTCHA] تم حل كابتشا الشهر: '{code}'")
+                    session.mark_captcha_solved()
+                    return True
+                else:
+                    logger.warning("[CAPTCHA] كابتشا الشهر فشلت بعد الإرسال")
+                    return False
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"[CAPTCHA] خطأ في معالجة كابتشا الشهر: {e}")
+            return False
+    
+    def scan_month_for_days(self, page: Page, url: str, session: SessionState) -> Optional[str]:
+        """
+        فحص الشهر بحثًا عن أيام متاحة
+        
+        تدفق طبيعي: شهر → يوم
+        """
+        try:
+            # الانتقال إلى صفحة الشهر
+            if not self.navigate_with_patience(page, url, "MONTH"):
+                return None
+            
+            # معالجة كابتشا الشهر بهدوء
+            if not self.handle_month_captcha(page, session):
+                return None
+            
+            # التحقق من وجود "لا توجد مواعيد"
+            content = page.content().lower()
+            if "no appointments" in content or "keine termine" in content:
+                logger.debug("[SCAN] لا توجد مواعيد في هذا الشهر")
+                return None
+            
+            # البحث عن أيام متاحة
+            day_selectors = [
+                "a.arrow[href*='appointment_showDay']",
+                "td.buchbar a",
+                "a[href*='showDay']"
+            ]
+            
+            for selector in day_selectors:
+                day_links = page.locator(selector).all()
+                if day_links:
+                    num_days = len(day_links)
+                    logger.critical(f"[FOUND] {num_days} يوم متاح!")
+                    
+                    with self.lock:
+                        self.stats.days_found += num_days
+                    
+                    # العودة مع رابط اليوم الأول
+                    first_href = day_links[0].get_attribute("href")
+                    if first_href:
+                        base_domain = self.base_url.split("/extern")[0]
+                        return f"{base_domain}/{first_href}"
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"[SCAN] خطأ في فحص الشهر: {e}")
+            return None
+    
+    def scan_day_for_times(self, page: Page, day_url: str, session: SessionState) -> Optional[str]:
+        """
+        فحص اليوم بحثًا عن أوقات متاحة
+        
+        تدفق طبيعي: يوم → وقت
+        """
+        try:
+            # الانتقال إلى صفحة اليوم
+            if not self.navigate_with_patience(page, day_url, "DAY"):
+                return None
+            
+            # البحث عن أوقات متاحة
+            time_selectors = [
+                "a.arrow[href*='appointment_showForm']",
+                "a[href*='showForm']",
+                "td.frei a"
+            ]
+            
+            for selector in time_selectors:
+                time_links = page.locator(selector).all()
+                if time_links:
+                    num_times = len(time_links)
+                    logger.critical(f"[FOUND] {num_times} وقت متاح!")
+                    
+                    with self.lock:
+                        self.stats.slots_found += num_times
+                    
+                    # العودة مع رابط الوقت الأول
+                    first_href = time_links[0].get_attribute("href")
+                    if first_href:
+                        base_domain = self.base_url.split("/extern")[0]
+                        return f"{base_domain}/{first_href}"
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"[SCAN] خطأ في فحص اليوم: {e}")
+            return None
+    
+    def fill_form_naturally(self, page: Page, session: SessionState) -> bool:
+        """
+        تعبئة النموذج بشكل طبيعي
+        
+        القاعدة 4: إدخال حدثي كامل
+        """
+        try:
+            logger.info("[FORM] تعبئة النموذج بشكل طبيعي...")
+            
+            # قائمة الحقول بالقيم
             fields = [
                 ("input[name='lastname']", Config.LAST_NAME),
                 ("input[name='firstname']", Config.FIRST_NAME),
                 ("input[name='email']", Config.EMAIL),
+                ("input[name='emailrepeat']", Config.EMAIL),
+                ("input[name='emailRepeat']", Config.EMAIL),
+                ("input[name='fields[0].content']", Config.PASSPORT),
+                ("input[name='fields[1].content']", Config.PHONE.replace("+", "00").strip())
             ]
             
+            # تعبئة كل حقل بشكل بشري
             for selector, value in fields:
-                if not self._human_type(page, selector, value, worker_logger):
-                    self._fast_inject(page, selector, value)
+                if page.locator(selector).count() > 0:
+                    self.human_type(page, selector, value)
+                    time.sleep(0.3)
             
-            if not self._human_type(page, "input[name='emailrepeat']", Config.EMAIL, worker_logger):
-                self._human_type(page, "input[name='emailRepeat']", Config.EMAIL, worker_logger)
-            
-            phone_value = Config.PHONE.replace("+", "00").strip()
-            
-            passport_id = self._find_input_id_by_label(page, "Passport")
-            if passport_id:
-                self._human_type(page, f"#{passport_id}", Config.PASSPORT, worker_logger)
-            else:
-                self._human_type(page, "input[name='fields[0].content']", Config.PASSPORT, worker_logger)
-            
-            phone_id = self._find_input_id_by_label(page, "Telephone")
-            if phone_id:
-                self._human_type(page, f"#{phone_id}", phone_value, worker_logger)
-            else:
-                self._human_type(page, "input[name='fields[1].content']", phone_value, worker_logger)
-            
-            self._select_category(page, worker_logger)
+            # اختيار الفئة (إن وجد)
+            try:
+                select_locator = page.locator("select").first
+                if select_locator.is_visible():
+                    # اختيار الخيار الثاني (عادة يكون الخيار الأول فارغ)
+                    select_locator.select_option(index=1)
+                    time.sleep(0.5)
+            except:
+                pass
             
             with self.lock:
-                self.global_stats.forms_filled += 1
+                self.stats.forms_filled += 1
             
-            self.debug_manager.save_debug_html(page, "form_filled", session.worker_id)
-            worker_logger.info("✅ Form filled")
+            logger.info("[FORM] النموذج معبأ")
             return True
             
         except Exception as e:
-            worker_logger.error(f"❌ Form fill error: {e}")
+            logger.error(f"[FORM] خطأ في تعبئة النموذج: {e}")
             return False
-
-    def _find_input_id_by_label(self, page: Page, label_text: str) -> Optional[str]:
-        try:
-            return page.evaluate(f"""
-                () => {{
-                    const labels = Array.from(document.querySelectorAll('label'));
-                    const target = labels.find(l => l.innerText.toLowerCase().includes("{label_text.lower()}"));
-                    return target ? target.getAttribute('for') : null;
-                }}
-            """)
-        except:
-            return None
-
-    def _select_category(self, page: Page, worker_logger):
-        try:
-            purpose = Config.PURPOSE.lower() if hasattr(Config, 'PURPOSE') and Config.PURPOSE else "aupair"
-            purpose_value = Config.PURPOSE_VALUES.get(purpose, Config.DEFAULT_PURPOSE) if hasattr(Config, 'PURPOSE_VALUES') else "1"
-            
-            select_elem = page.locator("select[name='fields[2].content']").first
-            if not select_elem.is_visible():
-                select_elem = page.locator("select").first
-            
-            if select_elem.is_visible():
-                select_elem.select_option(value=purpose_value)
-                page.evaluate("""
-                    const s = document.querySelector('select');
-                    if(s) { s.dispatchEvent(new Event('change', { bubbles: true })); }
-                """)
-        except Exception as e:
-            worker_logger.warning(f"Category selection warning: {e}")
-
-    def _fast_inject(self, page: Page, selector: str, value: str) -> bool:
-        try:
-            escaped_value = value.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
-            page.evaluate(f"""
-                const el = document.querySelector("{selector}");
-                if(el) {{
-                    el.value = "{escaped_value}";
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                }}
-            """)
-            return True
-        except:
-            return False
-
-    def _submit_form(self, page: Page, session: SessionState, worker_logger) -> bool:
-        worker_id = session.worker_id
-        max_attempts = 15
+    
+    def submit_form_naturally(self, page: Page, session: SessionState) -> bool:
+        """
+        إرسال النموذج بشكل طبيعي مع Retry ذكي
         
-        worker_logger.info(f"🚀 Starting submission...")
-
+        القاعدة 7: Retry داخل نفس الصفحة
+        القاعدة 8: الصمت ≠ فشل نهائي
+        """
+        max_attempts = 8
+        worker_id = session.worker_id
+        
+        logger.info(f"[SUBMIT] بدء التسلسل الطبيعي للإرسال")
+        
         for attempt in range(1, max_attempts + 1):
             try:
-                content = page.content().lower()
-                if any(term in content for term in ["appointment number", "termin nummer", "successfully booked"]):
-                    worker_logger.critical("🏆 ALREADY SUCCESS!")
-                    return self._handle_success_state(page, worker_id)
-
-                if "beginnen sie den buchungsvorgang neu" in content:
-                    worker_logger.error("❌ Session expired")
-                    session.health = SessionHealth.CRITICAL
+                logger.info(f"[SUBMIT] المحاولة {attempt}/{max_attempts}")
+                
+                # 1. التحقق من أننا على صفحة الفورم
+                lastname_input = page.locator("input[name='lastname']").first
+                if not lastname_input.is_visible(timeout=2000):
+                    logger.warning("[SUBMIT] لم يتم العثور على نموذج")
                     return False
-
+                
+                # 2. حل كابتشا الفورم
                 captcha_input = page.locator("input[name='captchaText']").first
                 if not captcha_input.is_visible():
+                    logger.warning("[SUBMIT] لم يتم العثور على حقل الكابتشا")
+                    return False
+                
+                success, code, status = self.solver.solve_from_page(
+                    page, f"FORM_{attempt}",
+                    session_age=session.age(),
+                    attempt=attempt,
+                    max_attempts=3
+                )
+                
+                if not success or not code:
+                    logger.warning(f"[SUBMIT] فشل حل الكابتشا: {status}")
+                    
+                    # تحديث صورة الكابتشا والمحاولة مرة أخرى
+                    self.solver.reload_captcha(page)
                     time.sleep(1)
                     continue
-
-                current_val = captcha_input.input_value()
-                if not current_val or len(current_val) < 4:
-                    success, code, _ = self.solver.solve_from_page(page, f"SUBMIT_{attempt}")
-                    if not success or not code:
-                        worker_logger.warning("🔄 Captcha failed, refreshing...")
-                        self._refresh_captcha(page)
-                        time.sleep(1.5)
-                        continue
-                    
-                    captcha_input.fill(code)
-                    time.sleep(0.3)
-
-                # Try submission methods
-                submit_methods = [
-                    ("Enter Key", lambda: self._submit_by_enter(page, captcha_input)),
-                    ("Button Click", lambda: self._submit_by_button(page)),
-                    ("JS Submit", lambda: self._submit_by_js(page)),
+                
+                # 3. إدخال الكابتشا بشكل بشري
+                captcha_input.click()
+                captcha_input.fill("")
+                self.human_type(page, "input[name='captchaText']", code)
+                time.sleep(0.5)
+                
+                # 4. البحث عن زر الإرسال والنقر عليه
+                submit_selectors = [
+                    "input[type='submit'][value='Submit']",
+                    "input[type='submit'][value='submit']",
+                    "input[name='action:appointment_addAppointment']",
+                    "#appointment_newAppointmentForm_appointment_addAppointment"
                 ]
                 
-                for method_name, method_func in submit_methods:
-                    worker_logger.info(f"⌨️ Attempt {attempt} using {method_name}...")
-                    
-                    try:
-                        with page.expect_navigation(timeout=10000, wait_until="domcontentloaded"):
-                            method_func()
+                submitted = False
+                for selector in submit_selectors:
+                    if self.human_click(page, selector):
+                        submitted = True
+                        logger.info(f"[SUBMIT] نقر على: {selector}")
+                        break
+                
+                if not submitted:
+                    # Fallback: Enter على حقل الكابتشا
+                    logger.info("[SUBMIT] استخدام Enter كبديل")
+                    page.keyboard.press("Enter")
+                
+                # 5. الانتظار الهادئ للنتيجة
+                logger.info("[SUBMIT] انتظار الاستجابة...")
+                time.sleep(4)  # انتظار طويل للاستقرار
+                
+                # 6. التحقق من النتيجة بهدوء
+                content = page.content().lower()
+                
+                # ✅ النجاح
+                success_indicators = [
+                    "appointment number",
+                    "termin wurde gebucht",
+                    "ihre buchung",
+                    "successfully",
+                    "confirmation"
+                ]
+                
+                for indicator in success_indicators:
+                    if indicator in content:
+                        logger.critical(f"[SUCCESS] تم العثور على: '{indicator}'")
                         
-                        time.sleep(0.5)
-                        if self._check_success(page, worker_logger):
-                            return True
-                            
-                    except Exception as nav_err:
-                        worker_logger.debug(f"{method_name} navigation: {nav_err}")
-                        if self._check_success(page, worker_logger):
-                            return True
+                        # حفظ الأدلة
+                        self.debug_manager.save_critical_screenshot(page, "SUCCESS", worker_id)
+                        self.debug_manager.save_debug_html(page, "SUCCESS", worker_id)
+                        
+                        # إرسال إشعار
+                        try:
+                            send_success_notification(self.session_id, worker_id, None)
+                        except:
+                            pass
+                        
+                        with self.lock:
+                            self.stats.success = True
+                        
+                        self.stop_event.set()
+                        return True
                 
+                # 🔄 الفشل الصامت - استمر في المحاولة
                 if page.locator("input[name='lastname']").is_visible():
-                    worker_logger.warning(f"↩️ Bounced back (Attempt {attempt})")
+                    logger.info(f"[SILENT] رفض صامت - إعادة المحاولة {attempt}")
                     
-                    lastname_val = page.locator("input[name='lastname']").input_value()
-                    if not lastname_val:
-                        worker_logger.info("📝 Re-filling form...")
-                        self._fill_booking_form(page, session, worker_logger)
-                    
-                    self._refresh_captcha(page)
-                    time.sleep(1)
+                    # تحديث الكابتشا للمحاولة التالية
+                    self.solver.reload_captcha(page)
+                    time.sleep(2)
                     continue
-
+                
+                # ❌ فشل صريح
+                error_indicators = [
+                    "beginnen sie den buchungsvorgang neu",
+                    "session expired",
+                    "invalid session"
+                ]
+                
+                for indicator in error_indicators:
+                    if indicator in content:
+                        logger.error(f"[HARD_FAIL] فشل صريح: '{indicator}'")
+                        return False
+                
+                # حالة غير معروفة - انتظر ثم حاول مرة أخرى
+                logger.warning(f"[UNKNOWN] حالة غير معروفة بعد المحاولة {attempt}")
+                time.sleep(3)
+                
             except Exception as e:
-                worker_logger.error(f"⚠️ Submit error: {e}")
-                time.sleep(1)
+                logger.error(f"[SUBMIT] خطأ في المحاولة {attempt}: {e}")
+                time.sleep(2)
         
+        logger.warning(f"[SUBMIT] تم تجاوز الحد الأقصى للمحاولات ({max_attempts})")
         return False
-
-    def _submit_by_enter(self, page: Page, captcha_input):
-        captcha_input.focus()
-        captcha_input.press("Enter")
-
-    def _submit_by_button(self, page: Page):
-        submit_btn = page.locator("""
-            #appointment_newAppointmentForm_appointment_addAppointment,
-            input[name='action:appointment_addAppointment'],
-            input[type='submit'][value='Submit']
-        """).first
-        submit_btn.click(timeout=5000)
-
-    def _submit_by_js(self, page: Page):
-        page.evaluate("""
-            const form = document.getElementById('appointment_newAppointmentForm');
-            if(form) {
-                form.action = "extern/appointment_addAppointment.do";
-                form.submit();
-            } else {
-                document.getElementsByName('appointment_newAppointmentForm')[0]?.submit();
-            }
-        """)
-
-    def _refresh_captcha(self, page: Page):
-        try:
-            refresh_btn = page.locator("#appointment_newAppointmentForm_form_newappointment_refreshcaptcha").first
-            if refresh_btn.is_visible():
-                refresh_btn.click()
-            else:
-                self.solver.reload_captcha(page)
-        except:
-            pass
-
-    def _check_success(self, page: Page, worker_logger) -> bool:
-        try:
-            content = page.content().lower()
-            
-            success_terms = ["appointment number", "termin nummer", "successfully booked", "ihre buchung"]
-            for term in success_terms:
-                if term in content:
-                    worker_logger.critical(f"🏆 SUCCESS! Found: '{term}'")
-                    return True
-            
-            return False
-        except:
-            return False
-
-    def _handle_success_state(self, page: Page, worker_id: int) -> bool:
-        self.global_stats.success = True
-        self.debug_manager.save_critical_screenshot(page, "VICTORY", worker_id)
-        self.debug_manager.save_debug_html(page, "SUCCESS", worker_id)
+    
+    def run_single_natural_session(self, browser: Browser) -> bool:
+        """
+        جلسة واحدة طبيعية من البداية إلى النهاية
+        
+        تطبيق حرفي لجميع القواعد التنفيذية
+        """
+        logger.info("[SESSION] بدء الجلسة الطبيعية الواحدة")
+        
+        # إنشاء السياق
+        page, session = self.create_natural_context(browser)
         
         try:
-            send_success_notification(self.session_id, worker_id)
-        except:
-            pass
-        
-        self.stop_event.set()
-        return True
-
-    def _run_single_session(self, browser: Browser, worker_id: int):
-        worker_logger = logging.getLogger(f"EliteSniperV2.Single")
-        worker_logger.info("[START] Single session mode")
-        
-        proxy = None
-        context, page, session = self.create_context(browser, worker_id, proxy)
-        session.role = SessionRole.SCOUT
-        
-        try:
-            max_cycles = 100
-            
-            for cycle in range(max_cycles):
-                if self.stop_event.is_set():
-                    break
+            # توليد روابط الأشهر للأولوية
+            def generate_priority_urls():
+                today = datetime.datetime.now().date()
+                base_clean = self.base_url.split("&dateStr=")[0] if "&dateStr=" in self.base_url else self.base_url
                 
-                mode = self.get_mode()
-                worker_logger.info(f"[CYCLE {cycle+1}] Mode: {mode}")
+                urls = []
+                priority_offsets = [2, 3, 1, 4, 5, 6]  # الأولوية: 2، 3، 1، 4، 5، 6 أشهر
                 
-                month_urls = self.generate_month_urls()
+                for offset in priority_offsets:
+                    future_date = today + datetime.timedelta(days=30 * offset)
+                    date_str = f"15.{future_date.month:02d}.{future_date.year}"
+                    urls.append(f"{base_clean}&dateStr={date_str}")
                 
-                for i, url in enumerate(month_urls):
+                return urls
+            
+            cycle = 0
+            max_cycles = 50
+            
+            while not self.stop_event.is_set() and cycle < max_cycles:
+                cycle += 1
+                logger.info(f"[CYCLE] الدورة {cycle}/{max_cycles}")
+                
+                # الحصول على روابط الأشهر
+                month_urls = generate_priority_urls()
+                
+                for month_url in month_urls:
                     if self.stop_event.is_set():
                         break
                     
-                    # [MODIFIED] Retry logic for navigation with exponential backoff
-                    nav_success = False
-                    for retry in range(3):
-                        try:
-                            worker_logger.info(f"[NAV] Attempt {retry+1}/3: {url[:60]}...")
-                            
-                            # [NEW] Pre-warm DNS and connection
-                            page.goto("about:blank", timeout=5000)
-                            
-                            # [MODIFIED] Longer timeout and wait until load instead of domcontentloaded
-                            page.goto(url, timeout=90000, wait_until="load")
-                            session.touch()
-                            self.global_stats.pages_loaded += 1
-                            nav_success = True
-                            worker_logger.info("[NAV] Success")
-                            break
-                            
-                        except Exception as e:
-                            worker_logger.warning(f"[NAV ERROR] Attempt {retry+1}: {e}")
-                            wait_time = (2 ** retry) + random.uniform(0, 1)  # Exponential backoff
-                            worker_logger.info(f"[NAV] Waiting {wait_time:.1f}s before retry...")
-                            time.sleep(wait_time)
+                    # ═══════════════════════════════════════════════
+                    # الخطوة 1: فحص الشهر
+                    # ═══════════════════════════════════════════════
+                    day_url = self.scan_month_for_days(page, month_url, session)
                     
-                    if not nav_success:
-                        worker_logger.error("[NAV] All retries failed, skipping URL")
+                    if not day_url:
+                        continue  # جرب الشهر التالي
+                    
+                    # ═══════════════════════════════════════════════
+                    # الخطوة 2: فحص اليوم
+                    # ═══════════════════════════════════════════════
+                    time_url = self.scan_day_for_times(page, day_url, session)
+                    
+                    if not time_url:
+                        continue  # جرب الشهر التالي
+                    
+                    # ═══════════════════════════════════════════════
+                    # الخطوة 3: الانتقال إلى نموذج الحجز
+                    # ═══════════════════════════════════════════════
+                    if not self.navigate_with_patience(page, time_url, "FORM"):
                         continue
                     
-                    if not self.validate_session_health(page, session, "MONTH"):
-                        context.close()
-                        context, page, session = self.create_context(browser, worker_id, proxy)
-                        break
+                    # حفظ صفحة الفورم للأدلة
+                    self.debug_manager.save_debug_html(page, "form_page", 1)
                     
-                    # Handle month captcha
-                    has_captcha, _ = self.solver.safe_captcha_check(page, "MONTH")
-                    if has_captcha:
-                        success, code, status = self.solver.solve_from_page(page, "MONTH")
-                        if success and code:
-                            self.solver.submit_captcha(page, "enter")
-                            page.wait_for_timeout(2000)
-                            self.global_stats.captchas_solved += 1
-                            session.mark_captcha_solved()
-                        else:
-                            self.global_stats.captchas_failed += 1
-                            continue
-                    
-                    # Check for days
-                    content = page.content().lower()
-                    if "no appointments" in content:
+                    # ═══════════════════════════════════════════════
+                    # الخطوة 4: تعبئة النموذج
+                    # ═══════════════════════════════════════════════
+                    if not self.fill_form_naturally(page, session):
+                        logger.warning("[FLOW] فشل تعبئة النموذج")
                         continue
                     
-                    day_links = page.locator("a.arrow[href*='appointment_showDay']").all()
-                    if not day_links:
-                        continue
+                    # ═══════════════════════════════════════════════
+                    # الخطوة 5: إرسال النموذج (نقطة اللاعودة)
+                    # ═══════════════════════════════════════════════
+                    logger.critical("[FLOW] نقطة اللاعودة - بدء الإرسال")
                     
-                    worker_logger.critical(f"[FOUND] {len(day_links)} days!")
-                    self.global_stats.days_found += len(day_links)
-                    
-                    # Day page
-                    first_href = day_links[0].get_attribute("href")
-                    if not first_href:
-                        continue
-                    
-                    base_domain = self.base_url.split("/extern")[0]
-                    day_url = f"{base_domain}/{first_href}" if not first_href.startswith("http") else first_href
-                    
-                    try:
-                        page.goto(day_url, timeout=60000, wait_until="domcontentloaded")
-                        session.touch()
-                    except Exception as e:
-                        worker_logger.error(f"[DAY ERROR] {e}")
-                        continue
-                    
-                    # Look for time slots
-                    slot_links = page.locator("a.arrow[href*='appointment_showForm']").all()
-                    if not slot_links:
-                        continue
-                    
-                    worker_logger.critical(f"[SLOTS] {len(slot_links)} time slots!")
-                    self.global_stats.slots_found += len(slot_links)
-                    
-                    # Form page
-                    slot_href = slot_links[0].get_attribute("href")
-                    if not slot_href:
-                        continue
-                    
-                    slot_url = f"{base_domain}/{slot_href}" if not slot_href.startswith("http") else slot_href
-                    
-                    try:
-                        page.goto(slot_url, timeout=60000, wait_until="domcontentloaded")
-                        session.touch()
-                    except Exception as e:
-                        worker_logger.error(f"[FORM ERROR] {e}")
-                        continue
-                    
-                    # Fill and submit
-                    worker_logger.info("[FORM] Step 1: Filling form...")
-                    if not self._fill_booking_form(page, session, worker_logger):
-                        continue
-                    
-                    worker_logger.info("[FORM] Step 2: Solving captcha...")
-                    has_captcha, _ = self.solver.safe_captcha_check(page, "FORM")
-                    
-                    if has_captcha:
-                        success, code, status = self.solver.solve_from_page(page, "FORM_SUBMIT")
-                        if not success or not code:
-                            worker_logger.warning("[CAPTCHA] Failed")
-                            continue
-                        self.global_stats.captchas_solved += 1
-                        session.mark_captcha_solved()
-                    
-                    worker_logger.info("[FORM] Step 3: Submitting...")
-                    if self._submit_form(page, session, worker_logger):
-                        return  # Success!
+                    if self.submit_form_naturally(page, session):
+                        # ✅ النجاح
+                        return True
+                    else:
+                        # ❌ فشل في هذا المسار، جرب شهرًا آخر
+                        logger.info("[FLOW] فشل في هذا المسار، الانتقال إلى الشهر التالي")
+                        break  # الخروج من حلقة الأشهر، ابدأ دورة جديدة
                 
-                # Sleep between cycles
-                sleep_time = self.get_sleep_interval()
-                time.sleep(sleep_time)
-                
-                # Session rebirth if old
-                if session.age() > Config.SESSION_MAX_AGE:
-                    context.close()
-                    context, page, session = self.create_context(browser, worker_id, proxy)
-                    
+                # انتظار بين الدورات
+                if not self.stop_event.is_set():
+                    wait_time = 5 if self.is_attack_time() else 10
+                    logger.info(f"[WAIT] انتظار {wait_time} ثانية")
+                    time.sleep(wait_time)
+            
+            logger.info("[SESSION] انتهت الدورات القصوى")
+            return False
+            
         except Exception as e:
-            worker_logger.error(f"[FATAL] {e}", exc_info=True)
+            logger.error(f"[SESSION] خطأ في الجلسة: {e}", exc_info=True)
+            return False
+            
         finally:
             try:
-                context.close()
+                page.context.close()
             except:
                 pass
-
+            logger.info("[SESSION] الجلسة مغلقة")
+    
     def run(self) -> bool:
+        """
+        نقطة الدخول الرئيسية
+        
+        العودة:
+            True إذا نجح الحجز، False بخلاف ذلك
+        """
         logger.info("=" * 70)
-        logger.info(f"[ELITE SNIPER V{self.VERSION}] - STARTING")
-        logger.info(f"[ATTACK TIME] {Config.ATTACK_HOUR}:00 AM {Config.TIMEZONE}")
+        logger.info(f"[ELITE SNIPER {self.VERSION}] - بدء التنفيذ")
+        logger.info(f"[TIME] وقت الهجوم: {Config.ATTACK_HOUR}:00 صباحًا بتوقيت عدن")
+        logger.info(f"[NOW] الوقت الحالي في عدن: {self.get_current_time_aden().strftime('%H:%M:%S')}")
         logger.info("=" * 70)
         
         try:
-            send_alert(f"[Elite Sniper v{self.VERSION} Started]")
+            # إرسال إشعار البدء
+            send_alert(
+                f"[Elite Sniper {self.VERSION} Started]\n"
+                f"Session: {self.session_id}\n"
+                f"Mode: Single Natural Session\n"
+                f"Attack: {Config.ATTACK_HOUR}:00 AM Aden\n"
+                f"NTP Offset: {self.ntp_sync.offset:.4f}s"
+            )
             
             with sync_playwright() as p:
-                # [MODIFIED] Use stealth args and persistent context
+                # تشغيل المتصفح
                 browser = p.chromium.launch(
                     headless=Config.HEADLESS,
-                    args=self.STEALTH_ARGS,  # [NEW] Anti-detection args
-                    timeout=120000,  # [NEW] Longer launch timeout
+                    args=Config.BROWSER_ARGS,
+                    timeout=60000
                 )
                 
-                self._run_single_session(browser, 1)
+                logger.info("[BROWSER] تم تشغيل المتصفح")
                 
+                try:
+                    # تشغيل الجلسة الطبيعية الواحدة
+                    success = self.run_single_natural_session(browser)
+                except Exception as e:
+                    logger.error(f"[ERROR] خطأ في الجلسة: {e}")
+                    success = False
+                
+                # إيقاف مزامنة الوقت
                 self.ntp_sync.stop_background_sync()
+                
+                # التنظيف
                 browser.close()
                 
-                if self.global_stats.success:
+                # حفظ الإحصائيات النهائية
+                final_stats = self.stats.to_dict()
+                self.debug_manager.save_stats(final_stats, "final_stats.json")
+                self.debug_manager.create_session_report(final_stats)
+                
+                if success:
                     self._handle_success()
                     return True
                 else:
                     self._handle_completion()
                     return False
-                    
+                
         except KeyboardInterrupt:
-            logger.info("[STOP] Manual stop")
+            logger.info("\n[STOP] إيقاف يدوي")
             self.stop_event.set()
+            self.ntp_sync.stop_background_sync()
+            send_alert("⏸️ Elite Sniper متوقف يدويًا")
             return False
+            
         except Exception as e:
-            logger.error(f"💀 Critical error: {e}")
+            logger.error(f"💀 خطأ حرج: {e}", exc_info=True)
+            send_alert(f"🚨 خطأ حرج: {str(e)[:200]}")
             return False
-
+    
     def _handle_success(self):
+        """معالجة النجاح"""
         logger.info("\n" + "=" * 70)
-        logger.info("[SUCCESS] MISSION ACCOMPLISHED!")
+        logger.info("[SUCCESS] المهمة أنجزت - الحجز ناجح!")
         logger.info("=" * 70)
-        send_alert("ELITE SNIPER - SUCCESS! Appointment booked!")
-
+        
+        runtime = (datetime.datetime.now() - self.start_time).total_seconds()
+        
+        send_alert(
+            f"ELITE SNIPER {self.VERSION} - SUCCESS!\n"
+            f"[+] تم حجز الموعد!\n"
+            f"الجلسة: {self.session_id}\n"
+            f"الوقت: {runtime:.0f} ثانية\n"
+            f"الإحصائيات: {self.stats.get_summary()}"
+        )
+    
     def _handle_completion(self):
+        """معالجة الانتهاء بدون نجاح"""
         logger.info("\n" + "=" * 70)
-        logger.info("[STOP] Completed without booking")
+        logger.info("[STOP] انتهت الجلسة بدون حجز")
         logger.info("=" * 70)
+        
+        runtime = (datetime.datetime.now() - self.start_time).total_seconds()
+        logger.info(f"[TIME] وقت التشغيل: {runtime:.0f} ثانية")
+        logger.info(f"[STATS] الإحصائيات النهائية: {self.stats.get_summary()}")
 
 
+# نقطة الدخول
 if __name__ == "__main__":
-    sniper = EliteSniperV2()
+    sniper = EliteSniperV2Corrected()
     success = sniper.run()
     sys.exit(0 if success else 1)
